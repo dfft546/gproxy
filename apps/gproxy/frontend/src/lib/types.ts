@@ -1,135 +1,134 @@
-export type Provider = {
-  id: number;
-  name: string;
-  config_json: unknown;
-  enabled: boolean;
-  updated_at: number;
+export type AdminGlobalConfig = {
+  host: string;
+  port: number;
+  proxy?: string | null;
+  dsn: string;
+  event_redact_sensitive: boolean;
 };
 
-export type Credential = {
+export type ProviderSummary = {
+  id: number;
+  name: string;
+  enabled: boolean;
+  updated_at: string;
+};
+
+export type ProviderDetail = {
+  id: number;
+  name: string;
+  enabled: boolean;
+  config_json: Record<string, unknown>;
+  updated_at: string;
+};
+
+export type CredentialRow = {
+  id: number;
+  name?: string | null;
+  settings_json: Record<string, unknown>;
+  secret_json: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  runtime_status?: CredentialRuntimeStatus;
+};
+
+export type CredentialListRow = {
   id: number;
   provider_id: number;
   name?: string | null;
-  secret: unknown;
-  meta_json: unknown;
-  weight: number;
+  settings_json: Record<string, unknown>;
   enabled: boolean;
-  created_at: number;
-  updated_at: number;
+  created_at: string;
+  updated_at: string;
+  runtime_status?: CredentialRuntimeStatus;
 };
 
-export type DisallowRecord = {
+export type CredentialUnavailableInfo = {
+  reason: string;
+  remaining_secs: number;
+  remaining_ms?: number;
+  until_epoch_ms?: number | null;
+};
+
+export type ModelUnavailableInfo = {
+  model: string;
+  reason: string;
+  remaining_secs: number;
+  remaining_ms?: number;
+  until_epoch_ms?: number | null;
+};
+
+export type CredentialRuntimeStatus = {
+  summary: "active" | "partial_unavailable" | "fully_unavailable" | "disabled";
+  credential_unavailable: CredentialUnavailableInfo | null;
+  model_unavailable: ModelUnavailableInfo[];
+};
+
+export type UserRow = {
   id: number;
-  credential_id: number;
-  scope_kind: string;
-  scope_value?: string | null;
-  level: string;
-  until_at?: number | null;
-  reason?: string | null;
-  updated_at: number;
+  name: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
-export type User = {
-  id: number;
-  name?: string | null;
-  created_at: number;
-  updated_at: number;
-};
-
-export type ApiKey = {
+export type UserKeyRow = {
   id: number;
   user_id: number;
-  key_value: string;
   label?: string | null;
   enabled: boolean;
-  created_at: number;
-  last_used_at?: number | null;
+  created_at: string;
+  updated_at: string;
 };
 
-export type ProviderStats = {
-  name: string;
-  credentials_total: number;
-  credentials_enabled: number;
-  disallow: number;
+export type UsageResponse = {
+  scope: string;
+  provider?: string;
+  credential_id?: number;
+  model?: string;
+  from: string;
+  to: string;
+  matched_rows: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  total_tokens: number;
 };
 
-export type GlobalConfig = {
-  host: string;
-  port: number;
-  admin_key: string;
-  dsn: string;
-  proxy?: string | null;
-  data_dir?: string | null;
+export type ToastKind = "success" | "error" | "info";
+
+export type ToastState = {
+  kind: ToastKind;
+  message: string;
+} | null;
+
+export type ProviderKind =
+  | "openai"
+  | "claude"
+  | "aistudio"
+  | "vertexexpress"
+  | "vertex"
+  | "geminicli"
+  | "claudecode"
+  | "codex"
+  | "antigravity"
+  | "nvidia"
+  | "deepseek"
+  | "custom";
+
+export type OAuthStartResponse = {
+  mode?: string;
+  auth_url?: string;
+  verification_uri?: string;
+  user_code?: string;
+  interval?: number;
+  state?: string;
+  redirect_uri?: string;
+  instructions?: string;
+  [key: string]: unknown;
 };
 
-export type UpstreamUsage = {
-  credential_id: number;
-  model?: string | null;
-  start: number;
-  end: number;
-  count: number;
-  tokens: Record<string, number>;
-};
-
-export type LogPage<T> = {
-  page: number;
-  page_size: number;
-  has_more: boolean;
-  items: T[];
-};
-
-export type DownstreamLog = {
-  id: number;
-  created_at: number;
-  provider: string;
-  provider_id?: number | null;
-  operation: string;
-  model?: string | null;
-  user_id?: number | null;
-  key_id?: number | null;
-  trace_id?: string | null;
-  request_method: string;
-  request_path: string;
-  request_query?: string | null;
-  request_headers: string;
-  request_body: string;
-  response_status: number;
-  response_headers: string;
-  response_body: string;
-};
-
-export type UpstreamLog = {
-  id: number;
-  created_at: number;
-  provider: string;
-  provider_id?: number | null;
-  operation: string;
-  model?: string | null;
-  credential_id?: number | null;
-  trace_id?: string | null;
-  request_method: string;
-  request_path: string;
-  request_query?: string | null;
-  request_headers: string;
-  request_body: string;
-  response_status: number;
-  response_headers: string;
-  response_body: string;
-  claude_input_tokens?: number | null;
-  claude_output_tokens?: number | null;
-  claude_total_tokens?: number | null;
-  claude_cache_creation_input_tokens?: number | null;
-  claude_cache_read_input_tokens?: number | null;
-  gemini_prompt_tokens?: number | null;
-  gemini_candidates_tokens?: number | null;
-  gemini_total_tokens?: number | null;
-  gemini_cached_tokens?: number | null;
-  openai_chat_prompt_tokens?: number | null;
-  openai_chat_completion_tokens?: number | null;
-  openai_chat_total_tokens?: number | null;
-  openai_responses_input_tokens?: number | null;
-  openai_responses_output_tokens?: number | null;
-  openai_responses_total_tokens?: number | null;
-  openai_responses_input_cached_tokens?: number | null;
-  openai_responses_output_reasoning_tokens?: number | null;
+export type OAuthCallbackResponse = {
+  [key: string]: unknown;
 };

@@ -6,8 +6,9 @@ use gproxy_protocol::claude::create_message::stream::{
     BetaStreamMessage, BetaStreamMessageDelta, BetaStreamUsage,
 };
 use gproxy_protocol::claude::create_message::types::{
-    BetaCacheCreation, BetaContentBlock, BetaMessage, BetaServerToolUsage, BetaServiceTierUsed,
-    BetaThinkingBlock, BetaToolCaller, BetaServerToolUseBlock, BetaStopReason, JsonObject,
+    BetaCacheCreation, BetaContentBlock, BetaContextManagementResponse, BetaMessage,
+    BetaServerToolUsage, BetaServerToolUseBlock, BetaServiceTierUsed, BetaStopReason,
+    BetaThinkingBlock, BetaToolCaller, JsonObject,
 };
 use serde_json::Value as JsonValue;
 
@@ -57,7 +58,10 @@ impl ClaudeStreamToMessageState {
                 self.message = Some(map_message_start(message));
                 None
             }
-            BetaStreamEventKnown::ContentBlockStart { index, content_block } => {
+            BetaStreamEventKnown::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 self.stream_blocks.insert(index, content_block);
                 None
             }
@@ -69,8 +73,12 @@ impl ClaudeStreamToMessageState {
                 self.finish_content_block(index);
                 None
             }
-            BetaStreamEventKnown::MessageDelta { delta, usage } => {
-                self.handle_message_delta(delta, usage);
+            BetaStreamEventKnown::MessageDelta {
+                delta,
+                usage,
+                context_management,
+            } => {
+                self.handle_message_delta(delta, usage, context_management);
                 None
             }
             BetaStreamEventKnown::MessageStop => self.finalize(),
@@ -82,9 +90,20 @@ impl ClaudeStreamToMessageState {
     fn handle_content_block_delta(&mut self, index: u32, delta: BetaStreamContentBlockDelta) {
         match delta {
             BetaStreamContentBlockDelta::TextDelta { text } => {
-                if let Some(BetaStreamContentBlock::Text(block)) = self.stream_blocks.get_mut(&index)
+                if let Some(BetaStreamContentBlock::Text(block)) =
+                    self.stream_blocks.get_mut(&index)
                 {
                     block.text.push_str(&text);
+                }
+            }
+            BetaStreamContentBlockDelta::CitationsDelta { citation } => {
+                if let Some(BetaStreamContentBlock::Text(block)) =
+                    self.stream_blocks.get_mut(&index)
+                {
+                    match &mut block.citations {
+                        Some(citations) => citations.push(citation),
+                        None => block.citations = Some(vec![citation]),
+                    }
                 }
             }
             BetaStreamContentBlockDelta::ThinkingDelta { thinking } => {
@@ -122,30 +141,39 @@ impl ClaudeStreamToMessageState {
 
         if let Some(json) = self.pending_json.remove(&index)
             && let Ok(value) = serde_json::from_str::<JsonValue>(&json)
-                && let Some(object) = value.as_object() {
-                    let mapped = object
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<JsonObject>();
-                    match &mut block {
-                        BetaStreamContentBlock::ToolUse(tool) => tool.input = mapped,
-                        BetaStreamContentBlock::ServerToolUse(tool) => tool.input = mapped,
-                        BetaStreamContentBlock::McpToolUse(tool) => tool.input = mapped,
-                        _ => {}
-                    }
-                }
+            && let Some(object) = value.as_object()
+        {
+            let mapped = object
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<JsonObject>();
+            match &mut block {
+                BetaStreamContentBlock::ToolUse(tool) => tool.input = mapped,
+                BetaStreamContentBlock::ServerToolUse(tool) => tool.input = mapped,
+                BetaStreamContentBlock::McpToolUse(tool) => tool.input = mapped,
+                _ => {}
+            }
+        }
 
         let content = map_stream_block(block);
         self.content_blocks.insert(index, content);
     }
 
-    fn handle_message_delta(&mut self, delta: BetaStreamMessageDelta, usage: BetaStreamUsage) {
+    fn handle_message_delta(
+        &mut self,
+        delta: BetaStreamMessageDelta,
+        usage: BetaStreamUsage,
+        context_management: Option<BetaContextManagementResponse>,
+    ) {
         if let Some(message) = self.message.as_mut() {
             if delta.stop_reason.is_some() {
                 message.stop_reason = delta.stop_reason;
             }
             if delta.stop_sequence.is_some() {
                 message.stop_sequence = delta.stop_sequence;
+            }
+            if context_management.is_some() {
+                message.context_management = context_management;
             }
             message.usage = map_usage(&usage);
         }
@@ -166,11 +194,7 @@ fn map_message_start(message: BetaStreamMessage) -> BetaMessage {
     BetaMessage {
         id: message.id,
         container: message.container,
-        content: message
-            .content
-            .into_iter()
-            .map(map_stream_block)
-            .collect(),
+        content: message.content.into_iter().map(map_stream_block).collect(),
         context_management: message.context_management,
         model: message.model,
         role: message.role,
@@ -184,14 +208,14 @@ fn map_message_start(message: BetaStreamMessage) -> BetaMessage {
 fn map_stream_block(block: BetaStreamContentBlock) -> BetaContentBlock {
     match block {
         BetaStreamContentBlock::Text(text) => BetaContentBlock::Text(text),
-        BetaStreamContentBlock::Thinking(block) => {
-            BetaContentBlock::Thinking(BetaThinkingBlock {
-                signature: block.signature.unwrap_or_default(),
-                thinking: block.thinking,
-                r#type: block.r#type,
-            })
+        BetaStreamContentBlock::Thinking(block) => BetaContentBlock::Thinking(BetaThinkingBlock {
+            signature: block.signature.unwrap_or_default(),
+            thinking: block.thinking,
+            r#type: block.r#type,
+        }),
+        BetaStreamContentBlock::RedactedThinking(block) => {
+            BetaContentBlock::RedactedThinking(block)
         }
-        BetaStreamContentBlock::RedactedThinking(block) => BetaContentBlock::RedactedThinking(block),
         BetaStreamContentBlock::ToolUse(block) => BetaContentBlock::ToolUse(block),
         BetaStreamContentBlock::ServerToolUse(block) => {
             BetaContentBlock::ServerToolUse(BetaServerToolUseBlock {
@@ -228,21 +252,23 @@ fn map_stream_block(block: BetaStreamContentBlock) -> BetaContentBlock {
 
 fn map_usage(usage: &BetaStreamUsage) -> gproxy_protocol::claude::create_message::types::BetaUsage {
     gproxy_protocol::claude::create_message::types::BetaUsage {
-        cache_creation: usage
-            .cache_creation
-            .clone()
-            .unwrap_or(BetaCacheCreation {
-                ephemeral_1h_input_tokens: 0,
-                ephemeral_5m_input_tokens: 0,
-            }),
+        cache_creation: usage.cache_creation.clone().unwrap_or(BetaCacheCreation {
+            ephemeral_1h_input_tokens: 0,
+            ephemeral_5m_input_tokens: 0,
+        }),
         cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
         cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
         input_tokens: usage.input_tokens.unwrap_or(0),
         output_tokens: usage.output_tokens.unwrap_or(0),
-        server_tool_use: Some(usage.server_tool_use.clone().unwrap_or(BetaServerToolUsage {
-            web_fetch_requests: 0,
-            web_search_requests: 0,
-        })),
+        server_tool_use: Some(
+            usage
+                .server_tool_use
+                .clone()
+                .unwrap_or(BetaServerToolUsage {
+                    web_fetch_requests: 0,
+                    web_search_requests: 0,
+                }),
+        ),
         // Stream usage doesn't include service tier; default to standard.
         service_tier: BetaServiceTierUsed::Standard,
     }

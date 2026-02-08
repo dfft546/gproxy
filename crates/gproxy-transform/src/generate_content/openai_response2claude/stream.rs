@@ -131,6 +131,7 @@ impl OpenAIResponseToClaudeStreamState {
                 stop_sequence: None,
             },
             usage: usage.unwrap_or_else(empty_usage),
+            context_management: None,
         }));
         events.push(BetaStreamEvent::Known(BetaStreamEventKnown::MessageStop));
         events

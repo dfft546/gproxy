@@ -6,9 +6,9 @@ use crate::claude::create_message::types::{
     BetaContainer, BetaContainerUploadBlock, BetaContextManagementResponse, BetaMcpToolResultBlock,
     BetaMcpToolUseBlock, BetaMessageRole, BetaMessageType, BetaRedactedThinkingBlock,
     BetaServerToolName, BetaServerToolUsage, BetaServerToolUseBlockType, BetaStopReason,
-    BetaTextBlock, BetaTextEditorCodeExecutionToolResultBlock, BetaThinkingBlockType,
-    BetaToolCaller, BetaToolSearchToolResultBlock, BetaToolUseBlock, BetaWebFetchToolResultBlock,
-    BetaWebSearchToolResultBlock, JsonObject, JsonValue,
+    BetaTextBlock, BetaTextCitation, BetaTextEditorCodeExecutionToolResultBlock,
+    BetaThinkingBlockType, BetaToolCaller, BetaToolSearchToolResultBlock, BetaToolUseBlock,
+    BetaWebFetchToolResultBlock, BetaWebSearchToolResultBlock, JsonObject, JsonValue,
 };
 use crate::claude::error::ErrorDetail;
 use crate::claude::types::RequestId;
@@ -106,6 +106,9 @@ pub enum BetaStreamContentBlockDelta {
     InputJsonDelta {
         partial_json: String,
     },
+    CitationsDelta {
+        citation: BetaTextCitation,
+    },
     ThinkingDelta {
         thinking: String,
     },
@@ -135,6 +138,8 @@ pub enum BetaStreamEventKnown {
         delta: BetaStreamMessageDelta,
         /// Token counts are cumulative for the stream so far.
         usage: BetaStreamUsage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_management: Option<BetaContextManagementResponse>,
     },
     MessageStop,
     Ping,

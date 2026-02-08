@@ -1,8 +1,10 @@
 target
 data
 samples
+.pnpm-store
 apps/gproxy/frontend/node_modules
 apps/gproxy/frontend/dist
 **/node_modules
 .git
 .github
+gproxy.db

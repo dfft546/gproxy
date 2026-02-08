@@ -36,6 +36,8 @@ use gproxy_protocol::openai::create_chat_completions::types::{
 };
 use serde_json::Value as JsonValue;
 
+const DEFAULT_CLAUDE_MAX_TOKENS: u32 = 8192;
+
 /// Convert an OpenAI chat-completions request into a Claude create-message request.
 pub fn transform_request(request: OpenAIChatCompletionRequest) -> ClaudeCreateMessageRequest {
     let mut system_texts = Vec::new();
@@ -653,6 +655,7 @@ fn map_reasoning(
         }),
         Some(ClaudeOutputConfig {
             effort: Some(effort),
+            format: None,
         }),
     )
 }
@@ -723,7 +726,7 @@ fn map_max_tokens(
 ) -> u32 {
     let value = body.max_completion_tokens.or(body.max_tokens).unwrap_or(0);
     if value <= 0 {
-        0
+        DEFAULT_CLAUDE_MAX_TOKENS
     } else if value > u32::MAX as i64 {
         u32::MAX
     } else {

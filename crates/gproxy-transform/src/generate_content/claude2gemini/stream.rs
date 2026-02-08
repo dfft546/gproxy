@@ -73,6 +73,7 @@ impl GeminiToClaudeStreamState {
                         stop_sequence: None,
                     },
                     usage: map_usage(response.usage_metadata),
+                    context_management: None,
                 }));
                 events.push(BetaStreamEvent::Known(BetaStreamEventKnown::MessageStop));
             }

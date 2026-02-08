@@ -1,60 +1,172 @@
 # gproxy
 
-gproxy is a Rust-based proxy for multiple AI providers with an embedded admin UI.
+[简体中文](README_zh.md)
 
-## Features
-- Multi-provider routing with per-credential management
-- Admin API for providers, credentials, users, and keys
-- Usage tracking and upstream usage views where available
-- Embedded SPA admin UI (React + Tailwind)
+A high-performance multi-provider LLM gateway in Rust, with an embedded admin SPA.
 
-## Quick start
+gproxy provides:
+- Unified downstream APIs (OpenAI / Claude / Gemini style routes)
+- Per-provider and per-credential routing
+- OAuth helper flows for supported providers
+- Usage aggregation + provider live usage querying
+- Built-in admin API + React 19 + Tailwind 4 admin UI at `/`
+
+## Built-in providers
+
+Current built-ins (seeded on first bootstrap):
+
+- `openai`
+- `claude`
+- `aistudio`
+- `vertexexpress`
+- `vertex`
+- `geminicli`
+- `claudecode`
+- `codex`
+- `antigravity`
+- `nvidia`
+- `deepseek`
+
+You can also create additional providers of kind `custom` from the admin UI/API.
+
+## Architecture (workspace)
+
+- `apps/gproxy`: runnable server binary (proxy + admin API + embedded UI)
+- `crates/gproxy-core`: bootstrap, in-memory state, proxy engine
+- `crates/gproxy-router`: HTTP routing (`/` proxy + `/admin`)
+- `crates/gproxy-provider-core`: provider abstraction, configs, credential/runtime state
+- `crates/gproxy-provider-impl`: built-in provider implementations
+- `crates/gproxy-storage`: SeaORM storage + usage persistence
+- `apps/gproxy/frontend`: admin SPA source (React 19 + Tailwind 4)
+
+## Quick start (local)
+
+Prerequisites:
+- Rust stable toolchain
+- Node.js + pnpm (only needed to rebuild frontend assets)
+
+1. Build admin frontend assets
+
 ```bash
-cargo run --release -- --admin-key your-admin-key
+pnpm -C apps/gproxy/frontend install --frozen-lockfile
+pnpm -C apps/gproxy/frontend build
 ```
-Open the UI at:
+
+2. Run server
+
+```bash
+cargo run -p gproxy -- --admin-key your-admin-key
 ```
-http://127.0.0.1:8787/
-```
+
+3. Open UI
+
+- Admin UI: `http://127.0.0.1:8080/`
+
+Default bind is `0.0.0.0:8080` unless changed by CLI/env/DB merged config.
 
 ## Configuration
-gproxy stores config in the database. By default it uses SQLite under `./data`.
 
-CLI flags:
-- `--host <ip>` (default `127.0.0.1`)
-- `--port <port>` (default `8787`)
-- `--admin-key <key>` (default `pwd`)
-- `--dsn <dsn>` (optional, e.g. `sqlite:///path/to/gproxy.db`)
-- `--data-dir <dir>` (default `./data`)
-- `--proxy <url>` (optional upstream proxy)
+Global config merge order at startup: `CLI > ENV > DB`, then persisted back to DB.
 
-Environment:
-- `GPROXY_DATA_DIR` (alternative way to set the data dir)
+CLI / ENV (from `gproxy_core::bootstrap::CliArgs`):
 
-Admin API auth:
-- `x-admin-key: <admin_key>` or `Authorization: Bearer <admin_key>`
+- `--dsn` / `GPROXY_DSN` (default: `sqlite://gproxy.db?mode=rwc`)
+- `--host` / `GPROXY_HOST` (default after merge: `0.0.0.0`)
+- `--port` / `GPROXY_PORT` (default after merge: `8080`)
+- `--admin-key` / `GPROXY_ADMIN_KEY` (plaintext input; stored as hash)
+- `--proxy` / `GPROXY_PROXY` (optional upstream egress proxy)
+- `--event-redact-sensitive` / `GPROXY_EVENT_REDACT_SENSITIVE` (default: `true`)
 
-See `route.md` for API routes and examples.
+Notes:
+- If `admin_key` is not provided and DB has none, gproxy generates one and prints it once on startup.
+- Built-in providers are auto-seeded when missing.
 
-## Frontend
-The admin UI is built from `apps/gproxy/frontend` and embedded from
-`apps/gproxy/frontend/dist` at build time.
+## Authentication model
 
-## Docker
+### Admin (`/admin/...`)
+
+Accepted admin key sources (first match):
+- `x-admin-key: <key>`
+- `Authorization: Bearer <key>`
+- Query `?admin_key=<key>` (useful for browser WebSocket `/admin/events/ws`)
+
+### Downstream proxy (`/v1/...` or `/{provider}/...`)
+
+Accepted user key sources (first match):
+- `Authorization: Bearer <key>`
+- `x-api-key: <key>`
+- `x-goog-api-key: <key>`
+- Query `?key=<key>`
+
+On bootstrap, `user0` is created and one user key is inserted using the same admin key hash, so the same plaintext key can be used for early proxy testing.
+
+## API overview
+
+See `route.md` for complete routes.
+
+Main route groups:
+- Aggregate proxy routes without provider prefix (e.g. `/v1/chat/completions`, `/v1/models`)
+- Provider-prefixed proxy routes (e.g. `/openai/v1/chat/completions`)
+- Provider internal helper routes:
+  - `GET /{provider}/oauth`
+  - `GET /{provider}/oauth/callback`
+  - `GET /{provider}/usage?credential_id=<id>`
+- Admin routes under `/admin/...` (providers, credentials, users, usage, ws events)
+
+## Admin UI
+
+The admin SPA is served at `/` and assets at `/assets/*`.
+
+Current UI modules include:
+- Provider configuration (including `custom` provider editing)
+- Credential management (view/edit/delete/enable, runtime status)
+- Batch credential import (key/json)
+- OAuth assistant for supported providers
+- Live usage / quota view per credential
+- User & API key management
+- Terminal event stream viewer (`/admin/events/ws`)
+- i18n (`zh_cn` / `en`)
+
+## Build and release
+
+### Binary
+
+```bash
+cargo build --release -p gproxy
+```
+
+### Docker image
+
 Build:
+
 ```bash
 docker build -t gproxy:local .
 ```
-Run:
+
+Run (explicit command form):
+
 ```bash
 docker run --rm -p 8787:8787 \
-  -e GPROXY_ADMIN_KEY=your-admin-key \
   -e GPROXY_HOST=0.0.0.0 \
   -e GPROXY_PORT=8787 \
-  -e GPROXY_DATA_DIR=/app/data \
+  -e GPROXY_ADMIN_KEY=your-admin-key \
+  -e GPROXY_DSN='sqlite:///app/data/gproxy.db?mode=rwc' \
   -v $(pwd)/data:/app/data \
-  gproxy:local
+  gproxy:local \
+  /usr/local/bin/gproxy --host 0.0.0.0 --port 8787 --admin-key your-admin-key --dsn 'sqlite:///app/data/gproxy.db?mode=rwc'
 ```
 
+### GitHub Actions
+
+- `.github/workflows/docker.yml`: build/push multi-arch image to GHCR
+- `.github/workflows/release-binary.yml`: build release binaries across OS/arch matrix
+
+## Related docs
+
+- `route.md`: routes and behavior notes
+- `provider.md`: provider credential/config specifics
+- `PLAN.md`: project planning draft
+
 ## License
+
 AGPL-3.0-or-later

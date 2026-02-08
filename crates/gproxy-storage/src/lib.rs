@@ -1,29 +1,12 @@
 pub mod entities;
-pub mod db;
-pub mod bus;
+pub mod seaorm;
+pub mod sinks;
 pub mod snapshot;
-pub mod traffic;
+pub mod storage;
 
-pub use bus::{ConfigEvent, ControlEvent, StorageBus, StorageBusConfig};
-pub use snapshot::StorageSnapshot;
-pub use gproxy_provider_core::{DownstreamTrafficEvent, UpstreamTrafficEvent};
-use std::sync::{OnceLock, RwLock};
-
-pub use traffic::{
-    AdminCredentialInput, AdminDisallowInput, AdminKeyInput, AdminProviderInput, AdminUserInput,
-    TrafficStorage,
+pub use seaorm::SeaOrmStorage;
+pub use sinks::DbEventSink;
+pub use snapshot::{
+    CredentialRow, GlobalConfigRow, ProviderRow, StorageSnapshot, UserKeyRow, UserRow,
 };
-
-static GLOBAL_STORAGE: OnceLock<RwLock<Option<TrafficStorage>>> = OnceLock::new();
-
-pub fn set_global_storage(storage: TrafficStorage) {
-    let lock = GLOBAL_STORAGE.get_or_init(|| RwLock::new(None));
-    let mut guard = lock.write().expect("global storage lock poisoned");
-    *guard = Some(storage);
-}
-
-pub fn global_storage() -> Option<TrafficStorage> {
-    let lock = GLOBAL_STORAGE.get_or_init(|| RwLock::new(None));
-    let guard = lock.read().expect("global storage lock poisoned");
-    guard.clone()
-}
+pub use storage::{Storage, StorageError, StorageResult, UsageAggregate, UsageAggregateFilter};

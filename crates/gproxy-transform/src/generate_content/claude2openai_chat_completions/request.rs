@@ -51,8 +51,14 @@ pub fn transform_request(request: ClaudeCreateMessageRequest) -> OpenAIChatCompl
 
     let (tools, web_search_options) = map_tools(request.body.tools);
     let (tool_choice, parallel_tool_calls) = map_tool_choice(request.body.tool_choice);
-    let reasoning_effort = map_reasoning(request.body.thinking, request.body.output_config);
-    let response_format = map_output_format(request.body.output_format);
+    let reasoning_effort = map_reasoning(request.body.thinking, request.body.output_config.clone());
+    let output_format = request
+        .body
+        .output_config
+        .as_ref()
+        .and_then(|config| config.format.clone())
+        .or(request.body.output_format.clone());
+    let response_format = map_output_format(output_format);
 
     let stop = map_stop_sequences(request.body.stop_sequences);
 
@@ -624,6 +630,7 @@ fn map_reasoning(
         Some(ClaudeOutputEffort::Low) => Some(ReasoningEffort::Low),
         Some(ClaudeOutputEffort::Medium) => Some(ReasoningEffort::Medium),
         Some(ClaudeOutputEffort::High) => Some(ReasoningEffort::High),
+        Some(ClaudeOutputEffort::Max) => Some(ReasoningEffort::XHigh),
         None => Some(ReasoningEffort::Medium),
     }
 }

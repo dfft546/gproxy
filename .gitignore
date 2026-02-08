@@ -1,4 +1,8 @@
 /target
-/data
+/samples
+/PLAN.md
 
-samples
+/provider.md
+
+/data
+gproxy.db

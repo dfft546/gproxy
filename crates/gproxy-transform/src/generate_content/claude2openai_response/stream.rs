@@ -93,7 +93,11 @@ impl ClaudeToOpenAIResponseStreamState {
                 self.handle_block_delta(index, delta)
             }
             BetaStreamEventKnown::ContentBlockStop { index } => self.handle_block_stop(index),
-            BetaStreamEventKnown::MessageDelta { delta, usage } => {
+            BetaStreamEventKnown::MessageDelta {
+                delta,
+                usage,
+                context_management: _,
+            } => {
                 self.stop_reason = delta.stop_reason;
                 if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
                     self.usage = Some(usage);
@@ -152,6 +156,7 @@ impl ClaudeToOpenAIResponseStreamState {
             BetaStreamContentBlockDelta::InputJsonDelta { partial_json } => {
                 self.append_tool_arguments(index, partial_json)
             }
+            BetaStreamContentBlockDelta::CitationsDelta { .. } => Vec::new(),
             BetaStreamContentBlockDelta::SignatureDelta { .. } => Vec::new(),
         }
     }

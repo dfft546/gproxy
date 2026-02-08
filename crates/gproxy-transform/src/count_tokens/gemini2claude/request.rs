@@ -485,10 +485,6 @@ fn map_generation_config(
         .and_then(|thinking| thinking.thinking_level)
         .and_then(map_thinking_level_to_effort);
 
-    let output_config = output_effort.map(|effort| ClaudeOutputConfig {
-        effort: Some(effort),
-    });
-
     let thinking = config.thinking_config.as_ref().map(|thinking| {
         if thinking.include_thoughts {
             ClaudeThinkingConfigParam::Enabled {
@@ -512,6 +508,11 @@ fn map_generation_config(
                 r#type: ClaudeJSONOutputFormatType::JsonSchema,
             })
         });
+
+    let output_config = output_effort.map(|effort| ClaudeOutputConfig {
+        effort: Some(effort),
+        format: output_format.clone(),
+    });
 
     (thinking, output_config, output_format)
 }

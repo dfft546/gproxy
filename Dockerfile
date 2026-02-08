@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+
 FROM node:lts-alpine3.23 AS frontend
 
 WORKDIR /app
@@ -32,7 +33,6 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY apps ./apps
-COPY src ./src
 COPY route.md ./route.md
 
 COPY --from=frontend /app/apps/gproxy/frontend/dist ./apps/gproxy/frontend/dist
@@ -40,7 +40,7 @@ COPY --from=frontend /app/apps/gproxy/frontend/dist ./apps/gproxy/frontend/dist
 RUN cargo build --release -p gproxy \
     && upx --best --lzma target/release/gproxy
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

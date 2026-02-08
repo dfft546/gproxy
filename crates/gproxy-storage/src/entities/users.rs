@@ -7,11 +7,13 @@ use time::OffsetDateTime;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub name: Option<String>,
+    #[sea_orm(unique_key = "user_name")]
+    pub name: String,
+    pub enabled: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     #[sea_orm(has_many)]
-    pub api_keys: HasMany<super::api_keys::Entity>,
+    pub keys: HasMany<super::user_keys::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

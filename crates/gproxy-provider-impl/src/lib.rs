@@ -1,17 +1,12 @@
-pub mod client;
-pub mod dispatch;
-pub mod credential;
-pub mod record;
-pub mod upstream;
-pub mod storage;
-pub mod provider;
-pub mod registry;
+//! Built-in upstream provider implementations.
+//!
+//! This crate does not perform network IO. It builds `UpstreamHttpRequest` for
+//! upstream calls (including provider-specific internal calls like `upstream_usage`).
 
-pub use credential::BaseCredential;
-pub use provider::{default_providers, ProviderDefault};
-pub use provider::{
-    AistudioProvider, AntiGravityProvider, ClaudeCodeProvider, ClaudeProvider, CodexProvider,
-    DeepSeekProvider, GeminiCliProvider, NvidiaProvider, OpenAIProvider, VertexExpressProvider,
-    VertexProvider,
-};
-pub use registry::{build_registry, build_registry_with_sink, ProviderRegistry};
+mod auth_extractor;
+mod builtin;
+mod providers;
+mod registry;
+
+pub use builtin::{BuiltinProviderSeed, builtin_provider_seeds};
+pub use registry::register_builtin_providers;

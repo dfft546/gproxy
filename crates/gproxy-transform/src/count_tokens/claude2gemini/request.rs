@@ -37,20 +37,28 @@ pub fn transform_request(request: ClaudeCountTokensRequest) -> GeminiCountTokens
         },
     };
     let model = model_id;
+    let model_resource = normalize_gemini_model_resource(&model);
 
     let contents = map_messages_to_contents(&request.body.messages);
     let system_instruction = map_system_to_content(request.body.system);
     let tools = map_tools(request.body.tools);
     let tool_config = map_tool_choice(request.body.tool_choice);
+    let output_format = request
+        .body
+        .output_config
+        .as_ref()
+        .and_then(|config| config.format.clone())
+        .or(request.body.output_format.clone());
+
     let generation_config = map_generation_config(
         request.body.thinking,
         request.body.output_config,
-        request.body.output_format,
+        output_format,
     );
 
     let generate_content_request = GenerateContentRequestBody {
         contents,
-        model: Some(model.clone()),
+        model: Some(model_resource),
         tools,
         tool_config,
         safety_settings: None,
@@ -67,6 +75,14 @@ pub fn transform_request(request: ClaudeCountTokensRequest) -> GeminiCountTokens
             contents: None,
             generate_content_request,
         },
+    }
+}
+
+fn normalize_gemini_model_resource(model: &str) -> String {
+    if model.starts_with("models/") {
+        model.to_string()
+    } else {
+        format!("models/{model}")
     }
 }
 
@@ -599,5 +615,6 @@ fn map_effort_to_thinking_level(effort: ClaudeOutputEffort) -> Option<ThinkingLe
         ClaudeOutputEffort::Low => Some(ThinkingLevel::Low),
         ClaudeOutputEffort::Medium => Some(ThinkingLevel::Medium),
         ClaudeOutputEffort::High => Some(ThinkingLevel::High),
+        ClaudeOutputEffort::Max => Some(ThinkingLevel::High),
     }
 }

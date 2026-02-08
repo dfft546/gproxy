@@ -65,9 +65,10 @@ impl OpenAIChatCompletionStreamToResponseState {
             let delta = choice.delta;
 
             if let Some(role) = delta.role
-                && matches!(role, ChatCompletionRole::Assistant) {
-                    state.role = ChatCompletionResponseRole::Assistant;
-                }
+                && matches!(role, ChatCompletionRole::Assistant)
+            {
+                state.role = ChatCompletionResponseRole::Assistant;
+            }
 
             if let Some(content) = delta.content {
                 state.content.push_str(&content);
@@ -138,7 +139,6 @@ impl OpenAIChatCompletionStreamToResponseState {
         })
     }
 
-
     fn build_response(&self) -> CreateChatCompletionResponse {
         let mut choices: Vec<ChatCompletionChoice> = self
             .choices
@@ -146,7 +146,9 @@ impl OpenAIChatCompletionStreamToResponseState {
             .map(|(index, state)| ChatCompletionChoice {
                 index: *index,
                 message: build_message(*index, state),
-                finish_reason: state.finish_reason.unwrap_or(ChatCompletionFinishReason::Stop),
+                finish_reason: state
+                    .finish_reason
+                    .unwrap_or(ChatCompletionFinishReason::Stop),
                 logprobs: state.logprobs.clone(),
             })
             .collect();
@@ -234,10 +236,7 @@ fn build_message(index: i64, state: &ChoiceState) -> ChatCompletionResponseMessa
                         .clone()
                         .unwrap_or_else(|| format!("tool_call_{index}_{idx}")),
                     function: ChatCompletionMessageToolCallFunction {
-                        name: tool
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| "tool".to_string()),
+                        name: tool.name.clone().unwrap_or_else(|| "tool".to_string()),
                         arguments: tool.arguments.clone(),
                     },
                 })
@@ -257,10 +256,12 @@ fn build_message(index: i64, state: &ChoiceState) -> ChatCompletionResponseMessa
 }
 
 fn merge_function_call(state: &mut ChoiceState, delta: ChatCompletionFunctionCallDelta) {
-    let entry = state.function_call.get_or_insert_with(|| ChatCompletionFunctionCall {
-        name: String::new(),
-        arguments: String::new(),
-    });
+    let entry = state
+        .function_call
+        .get_or_insert_with(|| ChatCompletionFunctionCall {
+            name: String::new(),
+            arguments: String::new(),
+        });
     if let Some(name) = delta.name {
         entry.name = name;
     }
@@ -271,20 +272,24 @@ fn merge_function_call(state: &mut ChoiceState, delta: ChatCompletionFunctionCal
 
 fn merge_tool_call(state: &mut ChoiceState, tool_call: ChatCompletionMessageToolCallChunk) {
     let index = tool_call.index;
-    let entry = state.tool_calls.entry(index).or_insert_with(|| ToolCallState {
-        id: tool_call.id.clone(),
-        name: None,
-        arguments: String::new(),
-    });
+    let entry = state
+        .tool_calls
+        .entry(index)
+        .or_insert_with(|| ToolCallState {
+            id: tool_call.id.clone(),
+            name: None,
+            arguments: String::new(),
+        });
 
     if tool_call.id.is_some() {
         entry.id = tool_call.id.clone();
     }
 
     if let Some(r#type) = tool_call.r#type
-        && !matches!(r#type, ChatCompletionToolCallChunkType::Function) {
-            return;
-        }
+        && !matches!(r#type, ChatCompletionToolCallChunkType::Function)
+    {
+        return;
+    }
 
     if let Some(function) = tool_call.function {
         if let Some(name) = function.name {
@@ -296,7 +301,10 @@ fn merge_tool_call(state: &mut ChoiceState, tool_call: ChatCompletionMessageTool
     }
 }
 
-fn merge_logprobs(target: &mut Option<ChatCompletionChoiceLogprobs>, incoming: ChatCompletionChoiceLogprobs) {
+fn merge_logprobs(
+    target: &mut Option<ChatCompletionChoiceLogprobs>,
+    incoming: ChatCompletionChoiceLogprobs,
+) {
     let entry = target.get_or_insert_with(|| ChatCompletionChoiceLogprobs {
         content: None,
         refusal: None,

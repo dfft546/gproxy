@@ -3,10 +3,13 @@ resolver = "2"
 members = [
   "crates/gproxy-protocol",
   "crates/gproxy-transform",
+  "crates/gproxy-common",
   "crates/gproxy-provider-core",
   "crates/gproxy-provider-impl",
   "crates/gproxy-storage",
   "crates/gproxy-core",
+  "crates/gproxy-router",
+  "crates/gproxy-admin",
   "apps/gproxy",
 ]
 

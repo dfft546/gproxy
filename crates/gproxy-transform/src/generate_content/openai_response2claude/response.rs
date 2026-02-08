@@ -31,13 +31,14 @@ pub fn transform_response(response: OpenAIResponse) -> ClaudeCreateMessageRespon
 
 fn build_content(response: &OpenAIResponse) -> Vec<BetaContentBlock> {
     if let Some(text) = response.output_text.as_ref()
-        && !text.is_empty() {
-            return vec![BetaContentBlock::Text(BetaTextBlock {
-                citations: None,
-                text: text.clone(),
-                r#type: BetaTextBlockType::Text,
-            })];
-        }
+        && !text.is_empty()
+    {
+        return vec![BetaContentBlock::Text(BetaTextBlock {
+            citations: None,
+            text: text.clone(),
+            r#type: BetaTextBlockType::Text,
+        })];
+    }
 
     let mut combined = String::new();
     for item in &response.output {
@@ -66,7 +67,12 @@ fn build_usage(response: &OpenAIResponse) -> BetaUsage {
     let (input_tokens, output_tokens) = response
         .usage
         .as_ref()
-        .map(|usage| (usage.input_tokens.max(0) as u32, usage.output_tokens.max(0) as u32))
+        .map(|usage| {
+            (
+                usage.input_tokens.max(0) as u32,
+                usage.output_tokens.max(0) as u32,
+            )
+        })
         .unwrap_or((0, 0));
     BetaUsage {
         cache_creation: BetaCacheCreation {

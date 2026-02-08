@@ -1,57 +1,100 @@
-export type ApiOptions = {
-  method?: string;
+export type RequestOptions = {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
   adminKey?: string;
-  headers?: Record<string, string>;
+  userKey?: string;
+  query?: Record<string, string | number | undefined | null>;
 };
 
-export type ApiError = {
+export class ApiError extends Error {
   status: number;
-  message: string;
-};
+  detail?: string;
 
-export async function apiRequest<T>(path: string, options: ApiOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers ?? {});
-  headers.set("Accept", "application/json");
-  if (options.adminKey) {
-    headers.set("x-admin-key", options.adminKey);
+  constructor(status: number, message: string, detail?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
   }
+}
 
+function withQuery(path: string, query?: RequestOptions["query"]): string {
+  if (!query) {
+    return path;
+  }
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  const qs = params.toString();
+  if (!qs) {
+    return path;
+  }
+  return `${path}?${qs}`;
+}
+
+function authHeaders(adminKey?: string, userKey?: string): Headers {
+  const headers = new Headers();
+  headers.set("Accept", "application/json");
+  if (adminKey) {
+    headers.set("x-admin-key", adminKey);
+  }
+  if (userKey) {
+    headers.set("Authorization", `Bearer ${userKey}`);
+  }
+  return headers;
+}
+
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const headers = authHeaders(options.adminKey, options.userKey);
   let body: string | undefined;
   if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");
     body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(path, {
+  const response = await fetch(withQuery(path, options.query), {
     method: options.method ?? "GET",
     headers,
     body
   });
 
   const text = await response.text();
+  const parsed = text ? safeParseJson(text) : null;
+
   if (!response.ok) {
-    const message = text || response.statusText;
-    const error: ApiError = { status: response.status, message };
-    throw error;
+    if (parsed && typeof parsed === "object") {
+      const source = parsed as Record<string, unknown>;
+      const message =
+        (typeof source.error === "string" && source.error) ||
+        (typeof source.message === "string" && source.message) ||
+        `HTTP ${response.status}`;
+      const detail = typeof source.detail === "string" ? source.detail : undefined;
+      throw new ApiError(response.status, message, detail);
+    }
+    throw new ApiError(response.status, text || `HTTP ${response.status}`);
   }
 
-  if (!text) {
-    return undefined as T;
-  }
-
-  return JSON.parse(text) as T;
+  return (parsed ?? (undefined as T)) as T;
 }
 
-export function apiErrorMessage(error: unknown): string {
-  if (!error) {
-    return "Unknown error";
+export function safeParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
-  if (typeof error === "string") {
-    return error;
+}
+
+export function formatApiError(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.detail ? `${error.message}: ${error.detail}` : error.message;
   }
-  if (typeof error === "object" && "message" in error) {
-    return String((error as { message?: string }).message ?? "Unknown error");
+  if (error instanceof Error) {
+    return error.message;
   }
-  return "Unknown error";
+  return String(error ?? "Unknown error");
 }

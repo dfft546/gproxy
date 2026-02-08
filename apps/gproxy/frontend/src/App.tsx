@@ -1,191 +1,181 @@
-import React, { useActionState, useCallback, useEffect, useState } from "react";
-import Sidebar, { type NavItem } from "./components/Sidebar";
-import Topbar from "./components/Topbar";
-import { Toast, type ToastState } from "./components/Toast";
-import { apiRequest } from "./lib/api";
-import { maskValue } from "./lib/format";
-import OverviewSection from "./sections/OverviewSection";
-import ChannelsSection from "./sections/ChannelsSection";
-import DisallowSection from "./sections/DisallowSection";
-import UsersSection from "./sections/UsersSection";
-import KeysSection from "./sections/KeysSection";
-import StatsSection from "./sections/StatsSection";
-import UsageSection from "./sections/UsageSection";
-import LogsSection from "./sections/LogsSection";
-import ConfigSection from "./sections/ConfigSection";
-import AboutSection from "./sections/AboutSection";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-const NAV_ITEMS: NavItem[] = [
-  { id: "overview", label: "Overview", description: "Health & snapshots" },
-  { id: "channels", label: "Channels", description: "Per-provider credentials" },
-  { id: "disallow", label: "Disallow", description: "Cooldowns & bans" },
-  { id: "users", label: "Users", description: "API principals" },
-  { id: "keys", label: "Keys", description: "Access tokens" },
-  { id: "stats", label: "Stats", description: "Pool coverage" },
-  { id: "usage", label: "Usage", description: "Token analytics" },
-  { id: "logs", label: "Logs", description: "Upstream & downstream" },
-  { id: "config", label: "Config", description: "Runtime settings" },
-  { id: "about", label: "About", description: "Panel info" }
-];
+import { LoginGate } from "./components/LoginGate";
+import { Sidebar, type NavItem } from "./components/Sidebar";
+import { Toast } from "./components/Toast";
+import { Badge, Button } from "./components/ui";
+import { useI18n } from "./i18n";
+import { request, formatApiError } from "./lib/api";
+import { mask } from "./lib/format";
+import type { ProviderDetail, ProviderSummary, ToastState } from "./lib/types";
+import { AboutSection } from "./sections/AboutSection";
+import { OverviewSection } from "./sections/OverviewSection";
+import { ProvidersSection } from "./sections/ProvidersSection";
+import { UsageSection } from "./sections/UsageSection";
+import { UsersSection } from "./sections/UsersSection";
+import { EventStreamSection } from "./sections/EventStreamSection";
 
-type AuthState = {
-  status: "idle" | "success" | "error";
-  message?: string;
-  key?: string;
-};
+const KEY_STORAGE = "gproxy_admin_key";
+
+type RouteId = "overview" | "providers" | "users" | "usage" | "events" | "about";
+const DEFAULT_ROUTE: RouteId = "overview";
+
+function readRouteFromHash(): RouteId {
+  const raw = window.location.hash.replace(/^#/, "");
+  if (raw === "credentials" || raw === "oauth") {
+    return "providers";
+  }
+  const value = raw as RouteId;
+  const allowed: RouteId[] = ["overview", "providers", "users", "usage", "events", "about"];
+  return allowed.includes(value) ? value : DEFAULT_ROUTE;
+}
 
 export default function App() {
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem("gproxy_admin_key") || "");
+  const { t, language, setLanguage } = useI18n();
+  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(KEY_STORAGE) ?? "");
   const [authed, setAuthed] = useState(false);
+  const [route, setRoute] = useState<RouteId>(() => readRouteFromHash());
   const [toast, setToast] = useState<ToastState>(null);
-  const [active, setActive] = useState<string>(NAV_ITEMS[0].id);
+  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+
+  const notify = useCallback((kind: "success" | "error" | "info", message: string) => {
+    setToast({ kind, message });
+  }, []);
 
   useEffect(() => {
     if (!toast) {
       return;
     }
-    const timer = setTimeout(() => setToast(null), 3200);
-    return () => clearTimeout(timer);
+    const timer = window.setTimeout(() => setToast(null), 3000);
+    return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const notify = useCallback((next: Exclude<ToastState, null>) => {
-    setToast(next);
+  useEffect(() => {
+    const onHash = () => setRoute(readRouteFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const validateKey = useCallback(
-    async (key: string) => {
-      try {
-        await apiRequest("/admin/health", { adminKey: key });
-        localStorage.setItem("gproxy_admin_key", key);
-        setAdminKey(key);
-        setAuthed(true);
-        notify({ type: "success", message: "Authenticated." });
-        return true;
-      } catch (error) {
-        notify({ type: "error", message: "Authentication failed." });
-        setAuthed(false);
-        return false;
-      }
-    },
-    [notify]
-  );
-
-  const [authState, loginAction, isPending] = useActionState<
-    AuthState,
-    FormData
-  >(async (_prev, formData) => {
-    const key = String(formData.get("adminKey") || "").trim();
-    if (!key) {
-      return { status: "error", message: "Admin key is required." };
-    }
-    const ok = await validateKey(key);
-    return ok
-      ? { status: "success", key }
-      : { status: "error", message: "Authentication failed." };
-  }, { status: "idle" });
-
-  useEffect(() => {
-    if (adminKey) {
-      void validateKey(adminKey);
-    }
-  }, [adminKey, validateKey]);
-
-  const logout = () => {
-    localStorage.removeItem("gproxy_admin_key");
-    setAdminKey("");
-    setAuthed(false);
+  const goRoute = (next: string) => {
+    const value = next as RouteId;
+    window.location.hash = value;
+    setRoute(value);
   };
 
-  const renderSection = () => {
-    switch (active) {
-      case "overview":
-        return <OverviewSection adminKey={adminKey} notify={notify} />;
-      case "channels":
-        return <ChannelsSection adminKey={adminKey} notify={notify} />;
-      case "disallow":
-        return <DisallowSection adminKey={adminKey} notify={notify} />;
-      case "users":
-        return <UsersSection adminKey={adminKey} notify={notify} />;
-      case "keys":
-        return <KeysSection adminKey={adminKey} notify={notify} />;
-      case "stats":
-        return <StatsSection adminKey={adminKey} notify={notify} />;
-      case "usage":
-        return <UsageSection adminKey={adminKey} notify={notify} />;
-      case "logs":
-        return <LogsSection adminKey={adminKey} notify={notify} />;
-      case "config":
-        return (
-          <ConfigSection
-            adminKey={adminKey}
-            notify={notify}
-            onAdminKeyUpdate={(next) => {
-              localStorage.setItem("gproxy_admin_key", next);
-              setAdminKey(next);
-              notify({ type: "info", message: "Admin key updated." });
-            }}
-          />
-        );
-      case "about":
-        return <AboutSection />;
-      default:
-        return null;
+  const validateLogin = useCallback(
+    async (key: string) => {
+      try {
+        await request("/admin/health", { adminKey: key });
+        localStorage.setItem(KEY_STORAGE, key);
+        setAdminKey(key);
+        setAuthed(true);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, message: formatApiError(error) };
+      }
+    },
+    []
+  );
+
+  const loadProviders = useCallback(async () => {
+    if (!adminKey) {
+      return;
     }
+    try {
+      const list = await request<{ providers: ProviderSummary[] }>("/admin/providers", {
+        adminKey
+      });
+      const details = await Promise.all(
+        (list.providers ?? []).map((provider) =>
+          request<ProviderDetail>(`/admin/providers/${provider.name}`, {
+            adminKey
+          })
+        )
+      );
+      setProviders(details);
+    } catch (error) {
+      notify("error", formatApiError(error));
+    }
+  }, [adminKey, notify]);
+
+  useEffect(() => {
+    if (!adminKey) {
+      return;
+    }
+    void validateLogin(adminKey).then((result) => {
+      if (!result.ok) {
+        setAuthed(false);
+      }
+    });
+  }, [adminKey, validateLogin]);
+
+  useEffect(() => {
+    if (!authed) {
+      return;
+    }
+    void loadProviders();
+  }, [authed, loadProviders]);
+
+  const navItems: NavItem[] = useMemo(
+    () => [
+      { id: "overview", label: t("nav.overview") },
+      { id: "providers", label: t("nav.providers") },
+      { id: "users", label: t("nav.users") },
+      { id: "usage", label: t("nav.usage") },
+      { id: "events", label: t("nav.events") },
+      { id: "about", label: t("nav.about") }
+    ],
+    [t]
+  );
+
+  const logout = () => {
+    localStorage.removeItem(KEY_STORAGE);
+    setAdminKey("");
+    setAuthed(false);
+    setProviders([]);
   };
 
   if (!authed) {
     return (
-      <div className="flex min-h-screen items-center justify-center px-6 py-12">
-        <div className="card card-shadow w-full max-w-md p-8">
-          <div className="text-sm uppercase tracking-[0.3em] text-slate-400">gproxy</div>
-          <div className="mt-2 text-2xl font-semibold text-slate-900">Admin Console</div>
-          <div className="mt-2 text-sm text-slate-500">
-            Enter your admin key to unlock the control plane.
-          </div>
-          <form action={loginAction} className="mt-6 space-y-4">
-            <div>
-              <label className="label">Admin key</label>
-              <input
-                className="input"
-                name="adminKey"
-                type="password"
-                placeholder="••••••••"
-                autoComplete="current-password"
-              />
-            </div>
-            <button className="btn btn-primary w-full" type="submit" disabled={isPending}>
-              {isPending ? "Validating..." : "Sign in"}
-            </button>
-          </form>
-        </div>
+      <>
+        <LoginGate initialKey={adminKey} onLogin={validateLogin} />
         <Toast toast={toast} />
-      </div>
+      </>
     );
   }
 
-  const activeItem = NAV_ITEMS.find((item) => item.id === active);
-
   return (
-    <div className="min-h-screen px-6 py-8">
+    <div className="app-shell">
       <Toast toast={toast} />
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 lg:flex-row">
-        <Sidebar items={NAV_ITEMS} active={active} onChange={setActive} />
-        <main className="flex-1 space-y-6">
-          <Topbar
-            title={activeItem?.label ?? "Admin"}
-            subtitle={activeItem?.description}
-            actions={
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="rounded-full border border-slate-200 bg-white/80 px-3 py-1 text-xs text-slate-500">
-                  Key {maskValue(adminKey, 5, 3)}
-                </span>
-                <button className="btn btn-primary" type="button" onClick={logout}>
-                  Sign out
-                </button>
-              </div>
-            }
-          />
-          {renderSection()}
+      <div className="mx-auto flex w-full max-w-[1300px] flex-col gap-6 px-4 py-6 lg:flex-row lg:px-6 lg:py-8">
+        <Sidebar active={route} onChange={goRoute} items={navItems} />
+        <main className="flex-1 space-y-5">
+          <header className="topbar-shell">
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900">{t("app.title")}</h1>
+              <p className="mt-1 text-sm text-slate-500">{t("app.subtitle")}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge>{t("app.key_mask")}: {mask(adminKey, 5, 4)}</Badge>
+              <select
+                className="select !w-auto"
+                value={language}
+                onChange={(event) => setLanguage(event.target.value as "en" | "zh_cn")}
+                aria-label={t("app.language")}
+              >
+                <option value="zh_cn">简体中文</option>
+                <option value="en">English</option>
+              </select>
+              <Button variant="neutral" onClick={logout}>{t("app.logout")}</Button>
+            </div>
+          </header>
+
+          {route === "overview" ? <OverviewSection adminKey={adminKey} notify={notify} /> : null}
+          {route === "providers" ? <ProvidersSection adminKey={adminKey} notify={notify} /> : null}
+          {route === "users" ? <UsersSection adminKey={adminKey} notify={notify} /> : null}
+          {route === "usage" ? <UsageSection adminKey={adminKey} providers={providers} notify={notify} /> : null}
+          {route === "events" ? <EventStreamSection adminKey={adminKey} notify={notify} /> : null}
+          {route === "about" ? <AboutSection /> : null}
         </main>
       </div>
     </div>

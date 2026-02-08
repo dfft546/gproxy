@@ -6,6 +6,11 @@ use gproxy_protocol::gemini::get_model::request::{
 /// Convert a Claude get-model request into a Gemini get-model request.
 pub fn transform_request(request: ClaudeGetModelRequest) -> GeminiGetModelRequest {
     let name = request.path.model_id;
+    let name = if name.starts_with("models/") {
+        name
+    } else {
+        format!("models/{name}")
+    };
 
     GeminiGetModelRequest {
         path: GeminiGetModelPath { name },

@@ -42,6 +42,12 @@ pub fn transform_request(request: ClaudeCreateMessageRequest) -> GeminiGenerateC
     let system_instruction = map_system_to_content(request.body.system);
     let tools = map_tools(request.body.tools);
     let tool_config = map_tool_choice(request.body.tool_choice);
+    let output_format = request
+        .body
+        .output_config
+        .as_ref()
+        .and_then(|config| config.format.clone())
+        .or(request.body.output_format.clone());
     let generation_config = map_generation_config(
         request.body.max_tokens,
         request.body.temperature,
@@ -50,7 +56,7 @@ pub fn transform_request(request: ClaudeCreateMessageRequest) -> GeminiGenerateC
         request.body.stop_sequences,
         request.body.thinking,
         request.body.output_config,
-        request.body.output_format,
+        output_format,
     );
 
     GeminiGenerateContentRequest {
@@ -615,5 +621,6 @@ fn map_effort_to_thinking_level(effort: ClaudeOutputEffort) -> Option<ThinkingLe
         ClaudeOutputEffort::Low => Some(ThinkingLevel::Low),
         ClaudeOutputEffort::Medium => Some(ThinkingLevel::Medium),
         ClaudeOutputEffort::High => Some(ThinkingLevel::High),
+        ClaudeOutputEffort::Max => Some(ThinkingLevel::High),
     }
 }

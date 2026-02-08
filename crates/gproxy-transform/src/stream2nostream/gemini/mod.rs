@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use gproxy_protocol::gemini::count_tokens::types::{
-    Content, FunctionCall, FunctionResponse, Part,
-};
+use gproxy_protocol::gemini::count_tokens::types::{Content, FunctionCall, FunctionResponse, Part};
 use gproxy_protocol::gemini::generate_content::response::GenerateContentResponse;
 use gproxy_protocol::gemini::generate_content::types::{
     Candidate, FinishReason, ModelStatus, PromptFeedback, UsageMetadata,
@@ -218,12 +216,12 @@ fn merge_part(parts: &mut Vec<Part>, mut incoming: Part) {
     if let Some(executable_code) = incoming.executable_code.take() {
         if let Some(last) = parts.last_mut()
             && let Some(last_code) = last.executable_code.as_mut()
-                && last_code.language == executable_code.language
-            {
-                last_code.code.push_str(&executable_code.code);
-                merge_part_metadata(last, &incoming);
-                return;
-            }
+            && last_code.language == executable_code.language
+        {
+            last_code.code.push_str(&executable_code.code);
+            merge_part_metadata(last, &incoming);
+            return;
+        }
         incoming.executable_code = Some(executable_code);
         parts.push(incoming);
         return;
@@ -232,12 +230,12 @@ fn merge_part(parts: &mut Vec<Part>, mut incoming: Part) {
     if let Some(function_call) = incoming.function_call.take() {
         if let Some(last) = parts.last_mut()
             && let Some(last_call) = last.function_call.as_mut()
-                && last_call.name == function_call.name
-            {
-                merge_function_call(last_call, function_call);
-                merge_part_metadata(last, &incoming);
-                return;
-            }
+            && last_call.name == function_call.name
+        {
+            merge_function_call(last_call, function_call);
+            merge_part_metadata(last, &incoming);
+            return;
+        }
         incoming.function_call = Some(function_call);
         parts.push(incoming);
         return;
@@ -246,12 +244,12 @@ fn merge_part(parts: &mut Vec<Part>, mut incoming: Part) {
     if let Some(function_response) = incoming.function_response.take() {
         if let Some(last) = parts.last_mut()
             && let Some(last_response) = last.function_response.as_mut()
-                && last_response.name == function_response.name
-            {
-                merge_function_response(last_response, function_response);
-                merge_part_metadata(last, &incoming);
-                return;
-            }
+            && last_response.name == function_response.name
+        {
+            merge_function_response(last_response, function_response);
+            merge_part_metadata(last, &incoming);
+            return;
+        }
         incoming.function_response = Some(function_response);
         parts.push(incoming);
         return;

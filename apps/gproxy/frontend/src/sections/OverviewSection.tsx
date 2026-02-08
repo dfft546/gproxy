@@ -1,143 +1,177 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import Panel from "../components/Panel";
-import StatCard from "../components/StatCard";
-import { apiErrorMessage, apiRequest } from "../lib/api";
-import { formatTimestamp } from "../lib/format";
-import type { GlobalConfig, ProviderStats } from "../lib/types";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-export default function OverviewSection({
-  adminKey,
-  notify
-}: {
+import { request, formatApiError } from "../lib/api";
+import type { AdminGlobalConfig, ProviderSummary, CredentialListRow, UserRow } from "../lib/types";
+import { Card, Button, FieldLabel, TextInput, Badge } from "../components/ui";
+import { useI18n } from "../i18n";
+
+type Props = {
   adminKey: string;
-  notify: (toast: { type: "success" | "error" | "info" | "warning"; message: string }) => void;
-}) {
-  const [health, setHealth] = useState<"ok" | "error" | "loading">("loading");
-  const [stats, setStats] = useState<ProviderStats[]>([]);
-  const [config, setConfig] = useState<GlobalConfig | null>(null);
-  const [configUpdatedAt, setConfigUpdatedAt] = useState<number | null>(null);
+  notify: (kind: "success" | "error" | "info", message: string) => void;
+};
+
+export function OverviewSection({ adminKey, notify }: Props) {
+  const { t } = useI18n();
+  const [globalConfig, setGlobalConfig] = useState<AdminGlobalConfig | null>(null);
+  const [draft, setDraft] = useState({
+    host: "",
+    port: "",
+    proxy: "",
+    eventRedactSensitive: false
+  });
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [credentials, setCredentials] = useState<CredentialListRow[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [keyCount, setKeyCount] = useState<number>(0);
   const [loading, setLoading] = useState(false);
 
-  const loadOverview = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [healthResp, statsResp, configResp] = await Promise.all([
-        apiRequest<{ status: string }>("/admin/health", { adminKey }),
-        apiRequest<{ providers: ProviderStats[] }>("/admin/stats", { adminKey }),
-        apiRequest<{ config_json: GlobalConfig; updated_at: number }>("/admin/config", { adminKey })
+      const [global, providerResp, credentialResp, userResp] = await Promise.all([
+        request<AdminGlobalConfig>("/admin/global_config", { adminKey }),
+        request<{ providers: ProviderSummary[] }>("/admin/providers", { adminKey }),
+        request<{ credentials: CredentialListRow[] }>("/admin/credentials", { adminKey }),
+        request<{ users: UserRow[] }>("/admin/users", { adminKey })
       ]);
-      setHealth(healthResp.status === "ok" ? "ok" : "error");
-      setStats(statsResp.providers ?? []);
-      setConfig(configResp.config_json ?? null);
-      setConfigUpdatedAt(configResp.updated_at ?? null);
+
+      const usersData = userResp.users ?? [];
+      const keysByUser = await Promise.all(
+        usersData.map((user) =>
+          request<{ keys: Array<{ id: number }> }>(`/admin/users/${user.id}/keys`, {
+            adminKey
+          })
+        )
+      );
+      const totalKeys = keysByUser.reduce((sum, row) => sum + (row.keys?.length ?? 0), 0);
+
+      setGlobalConfig(global);
+      setDraft({
+        host: global.host,
+        port: String(global.port),
+        proxy: global.proxy ?? "",
+        eventRedactSensitive: Boolean(global.event_redact_sensitive)
+      });
+      setProviders(providerResp.providers ?? []);
+      setCredentials(credentialResp.credentials ?? []);
+      setUsers(usersData);
+      setKeyCount(totalKeys);
     } catch (error) {
-      setHealth("error");
-      notify({ type: "error", message: apiErrorMessage(error) });
+      notify("error", formatApiError(error));
     } finally {
       setLoading(false);
     }
   }, [adminKey, notify]);
 
   useEffect(() => {
-    loadOverview();
-  }, [loadOverview]);
+    void load();
+  }, [load]);
 
-  const totals = useMemo(() => {
-    const providers = stats.length;
-    const credentialsTotal = stats.reduce((sum, item) => sum + item.credentials_total, 0);
-    const credentialsEnabled = stats.reduce((sum, item) => sum + item.credentials_enabled, 0);
-    const disallow = stats.reduce((sum, item) => sum + item.disallow, 0);
-    return { providers, credentialsTotal, credentialsEnabled, disallow };
-  }, [stats]);
+  const saveGlobal = async () => {
+    try {
+      const port = Number(draft.port);
+      if (Number.isNaN(port)) {
+        throw new Error(t("errors.invalid_number"));
+      }
+      await request("/admin/global_config", {
+        method: "PUT",
+        adminKey,
+        body: {
+          host: draft.host.trim(),
+          port,
+          proxy: draft.proxy.trim() || null,
+          event_redact_sensitive: draft.eventRedactSensitive
+        }
+      });
+      notify("success", t("overview.global_saved"));
+      await load();
+    } catch (error) {
+      notify("error", formatApiError(error));
+    }
+  };
+
+  const cards = useMemo(
+    () => [
+      { label: t("overview.providers"), value: providers.length },
+      { label: t("overview.credentials"), value: credentials.length },
+      { label: t("overview.users"), value: users.length },
+      { label: t("overview.keys"), value: keyCount }
+    ],
+    [credentials.length, keyCount, providers.length, t, users.length]
+  );
 
   return (
-    <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-4">
-        <StatCard
-          label="System health"
-          value={health === "loading" ? "Checking" : health === "ok" ? "Healthy" : "Error"}
-          hint={health === "ok" ? "Admin key verified" : "Unable to reach admin API"}
-        />
-        <StatCard label="Providers" value={totals.providers} hint="Available pools" />
-        <StatCard label="Credentials" value={totals.credentialsTotal} hint="All stored entries" />
-        <StatCard label="Disallow marks" value={totals.disallow} hint="Active restrictions" />
-      </div>
-
-      <Panel
-        title="Cluster snapshot"
-        subtitle="Quick glance at pool health and credential distribution."
+    <div className="space-y-5">
+      <Card
+        title={t("overview.title")}
+        subtitle={t("overview.subtitle")}
         action={
-          <button className="btn btn-ghost" type="button" onClick={loadOverview}>
-            Refresh snapshot
-          </button>
+          <Button variant="neutral" onClick={() => void load()} disabled={loading}>
+            {t("common.refresh")}
+          </Button>
         }
       >
-        {loading ? (
-          <div className="text-sm text-slate-500">Loading overview...</div>
-        ) : (
-          <div className="grid gap-3 md:grid-cols-2">
-            {stats.map((item) => (
-              <div key={item.name} className="rounded-xl border border-slate-200 bg-white/90 p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-800">{item.name}</div>
-                    <div className="text-xs text-slate-400">Provider pool</div>
-                  </div>
-                  <span className="badge border-slate-200 text-slate-500">
-                    {item.credentials_enabled}/{item.credentials_total} enabled
-                  </span>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
-                  <div>Total credentials</div>
-                  <div className="text-right text-slate-700">{item.credentials_total}</div>
-                  <div>Enabled credentials</div>
-                  <div className="text-right text-slate-700">{item.credentials_enabled}</div>
-                  <div>Disallow entries</div>
-                  <div className="text-right text-slate-700">{item.disallow}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Panel>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {cards.map((item) => (
+            <div key={item.label} className="metric-card">
+              <div className="text-xs uppercase tracking-[0.12em] text-slate-500">{item.label}</div>
+              <div className="mt-2 text-2xl font-semibold text-slate-900">{item.value}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
 
-      <Panel
-        title="Active runtime config"
-        subtitle="These values are loaded from /admin/config."
-      >
-        {config ? (
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <div className="label">Bind</div>
-              <div className="mt-2 text-sm text-slate-700">
-                {config.host}:{config.port}
-              </div>
-            </div>
-            <div>
-              <div className="label">DSN</div>
-              <div className="mt-2 text-sm text-slate-700 break-all">{config.dsn}</div>
-            </div>
-            <div>
-              <div className="label">Proxy</div>
-              <div className="mt-2 text-sm text-slate-700">{config.proxy || "-"}</div>
-            </div>
-            <div>
-              <div className="label">Data dir</div>
-              <div className="mt-2 text-sm text-slate-700 break-all">
-                {config.data_dir || "-"}
-              </div>
-            </div>
-            <div>
-              <div className="label">Config updated</div>
-              <div className="mt-2 text-sm text-slate-700">
-                {formatTimestamp(configUpdatedAt ?? undefined)}
-              </div>
+      <Card title="Global Config" subtitle="/admin/global_config">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <FieldLabel>{t("overview.host")}</FieldLabel>
+            <div className="mt-2">
+              <TextInput value={draft.host} onChange={(value) => setDraft((prev) => ({ ...prev, host: value }))} />
             </div>
           </div>
-        ) : (
-          <div className="text-sm text-slate-500">No config loaded.</div>
-        )}
-      </Panel>
+          <div>
+            <FieldLabel>{t("overview.port")}</FieldLabel>
+            <div className="mt-2">
+              <TextInput
+                type="number"
+                value={draft.port}
+                onChange={(value) => setDraft((prev) => ({ ...prev, port: value }))}
+              />
+            </div>
+          </div>
+          <div>
+            <FieldLabel>{t("overview.proxy")}</FieldLabel>
+            <div className="mt-2">
+              <TextInput value={draft.proxy} onChange={(value) => setDraft((prev) => ({ ...prev, proxy: value }))} />
+            </div>
+          </div>
+          <div>
+            <FieldLabel>{t("overview.dsn")}</FieldLabel>
+            <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              {globalConfig?.dsn || "-"}
+            </div>
+          </div>
+          <div className="md:col-span-2 flex items-center gap-2">
+            <input
+              id="event-redact-sensitive"
+              type="checkbox"
+              checked={draft.eventRedactSensitive}
+              onChange={(event) =>
+                setDraft((prev) => ({ ...prev, eventRedactSensitive: event.target.checked }))
+              }
+            />
+            <label htmlFor="event-redact-sensitive" className="text-sm text-slate-700">
+              {t("overview.event_redact_sensitive")}
+            </label>
+            <Badge active={draft.eventRedactSensitive}>
+              {draft.eventRedactSensitive ? t("common.enabled") : t("common.disabled")}
+            </Badge>
+          </div>
+        </div>
+        <div className="mt-4">
+          <Button onClick={() => void saveGlobal()}>{t("common.save")}</Button>
+        </div>
+      </Card>
     </div>
   );
 }

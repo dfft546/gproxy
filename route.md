@@ -1,152 +1,193 @@
-# Routes
-
-All admin routes require one of:
-- `x-admin-key: <admin_key>`
-- `authorization: Bearer <admin_key>`
-
-Timestamps are unix seconds.
-
-## Admin
-
-### GET /admin/health
-```bash
-curl -H "x-admin-key: pwd" http://127.0.0.1:8787/admin/health
-```
-
-### GET /admin/config
-```bash
-curl -H "x-admin-key: pwd" http://127.0.0.1:8787/admin/config
-```
-
-### PUT /admin/config
-```bash
-curl -X PUT -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/config \
-  -d '{
-    "host":"127.0.0.1",
-    "port":8787,
-    "admin_key":"pwd",
-    "dsn":"sqlite:///path/to/gproxy.db",
-    "proxy":null
-  }'
-```
-Notes:
-- When `dsn` changes, the server connects to the new database, syncs schema, writes config there, reloads snapshot, and switches to the new connection immediately.
-- Response includes `dsn_changed: true|false`.
-- `bind_changed` reports `host/port` changes and triggers an immediate rebind.
-- `proxy_changed` reports `proxy` updates and takes effect immediately for new requests.
-
-### GET /admin/providers
-### POST /admin/providers
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/providers \
-  -d '{
-    "id": 1,
-    "name": "openai",
-    "config_json": {},
-    "enabled": true
-  }'
-```
-
-### PUT /admin/providers/{id}
-### DELETE /admin/providers/{id}
-
-### GET /admin/credentials
-### POST /admin/credentials
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/credentials \
-  -d '{
-    "id": 1,
-    "provider_id": 1,
-    "name": "key-1",
-    "secret": {"api_key":"..."},
-    "meta_json": {},
-    "weight": 1,
-    "enabled": true
-  }'
-```
-Or by name:
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/credentials \
-  -d '{
-    "provider_name": "claude",
-    "name": "key-1",
-    "secret": {"api_key":"..."},
-    "meta_json": {},
-    "weight": 1,
-    "enabled": true
-  }'
-```
-Notes:
-- Claude credential: `secret.api_key` (or `secret` as a string), `meta_json.base_url` optional.
-
-### PUT /admin/credentials/{id}
-### DELETE /admin/credentials/{id}
-
-### GET /admin/disallow
-### POST /admin/disallow
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/disallow \
-  -d '{
-    "credential_id": 1,
-    "scope_kind": "model",
-    "scope_value": "gpt-4.1",
-    "level": "cooldown",
-    "until_at": 1730000000,
-    "reason": "rate_limit"
-  }'
-```
-
-### DELETE /admin/disallow/{id}
-
-### GET /admin/users
-### POST /admin/users
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/users \
-  -d '{
-    "id": 2,
-    "name": "alice"
-  }'
-```
-
-### DELETE /admin/users/{id}
-
-### GET /admin/keys
-### POST /admin/keys
-```bash
-curl -X POST -H "x-admin-key: pwd" -H "content-type: application/json" \
-  http://127.0.0.1:8787/admin/keys \
-  -d '{
-    "id": 2,
-    "user_id": 2,
-    "key_value": "user-key-1",
-    "label": "default",
-    "enabled": true
-  }'
-```
-
-### DELETE /admin/keys/{id}
-### PUT /admin/keys/{id}/disable
-
-### POST /admin/reload
-```bash
-curl -X POST -H "x-admin-key: pwd" http://127.0.0.1:8787/admin/reload
-```
-
-### GET /admin/stats
-```bash
-curl -H "x-admin-key: pwd" http://127.0.0.1:8787/admin/stats
-```
+# GProxy Routes (Current)
 
 ## Proxy
 
-### /{provider}/{*path}
-Proxy all provider requests.
-```bash
-curl -H "x-api-key: <user_key>" http://127.0.0.1:8787/openai/v1/models
-```
+### Auth (downstream)
+Accepted user key sources (first match wins):
+- `Authorization: Bearer <key>`
+- `x-api-key: <key>`
+- `x-goog-api-key: <key>`
+- Query `?key=<key>`
+
+Note: downstream auth headers/query are **stripped** before forwarding upstream.
+Note: `trace_id` is server-generated as UUIDv7 per downstream request and reused for all corresponding upstream events; request headers `x-trace-id` / `x-request-id` are ignored.
+
+### Aggregate routes (`/...`, no `{provider}`)
+
+#### Claude
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+
+#### OpenAI
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `POST /v1/responses/input_tokens`
+
+#### Shared models
+- `GET /v1/models`
+- `GET /v1/models/{model}`
+
+Disambiguation: `GET /v1/models` + `GET /v1/models/{model}`:
+- Claude when header `anthropic-version` is present.
+- Gemini v1 when downstream key style is Gemini (`x-goog-api-key` or `?key=`).
+- Otherwise OpenAI.
+
+#### Gemini
+- `POST /v1/models/{model}:generateContent`
+- `POST /v1/models/{model}:streamGenerateContent`
+- `POST /v1/models/{model}:countTokens`
+- `POST /v1beta/models/{model}:generateContent`
+- `POST /v1beta/models/{model}:streamGenerateContent`
+- `POST /v1beta/models/{model}:countTokens`
+- `GET /v1beta/models`
+- `GET /v1beta/models/{name}`
+
+#### Model prefix rules (`provider/model`)
+- Aggregate request model identifiers must be `provider/model`.
+- Split rule uses the first `/` only, so model names may still include `/`.
+- Missing or invalid prefix returns `400` with `error=missing_provider_prefix`.
+
+#### Aggregate list response extensions
+For `GET /v1/models` and `GET /v1beta/models`, response includes:
+- `partial: boolean`
+
+Error handling policy:
+- `no_active_credentials` is silently skipped.
+- `unsupported_operation` / `provider_disabled` are silently skipped.
+- Other provider failures only affect `partial=true`; detailed errors are not returned to downstream clients.
+- HTTP status is always `200`.
+
+#### Response model normalization
+For aggregate routes only, response model identifiers are normalized to include provider prefix:
+- OpenAI/Claude model fields: `provider/model`
+- Gemini model resource name: `models/provider/model`
+
+Existing provider-prefixed routes (`/{provider}/...`) remain unchanged.
+
+### Provider routes (`/{provider}/...`)
+
+### Claude
+- `POST /{provider}/v1/messages`
+- `POST /{provider}/v1/messages/count_tokens`
+- `GET /{provider}/v1/models`
+- `GET /{provider}/v1/models/{model}`
+
+Disambiguation: `GET /v1/models` + `GET /v1/models/{model}` are treated as **Claude** when header `anthropic-version` is present.
+
+### OpenAI
+- `POST /{provider}/v1/chat/completions`
+- `POST /{provider}/v1/responses`
+- `POST /{provider}/v1/responses/input_tokens`
+- `GET /{provider}/v1/models`
+- `GET /{provider}/v1/models/{model}`
+
+Disambiguation: `GET /v1/models` + `GET /v1/models/{model}` default to **OpenAI** when not Claude/Gemini.
+
+### Gemini
+#### Generate / Stream / Count (v1 and v1beta)
+- `POST /{provider}/v1/models/{model}:generateContent`
+- `POST /{provider}/v1/models/{model}:streamGenerateContent`
+- `POST /{provider}/v1/models/{model}:countTokens`
+
+- `POST /{provider}/v1beta/models/{model}:generateContent`
+- `POST /{provider}/v1beta/models/{model}:streamGenerateContent`
+- `POST /{provider}/v1beta/models/{model}:countTokens`
+
+#### Models
+- `GET /{provider}/v1beta/models`
+- `GET /{provider}/v1beta/models/{name}`
+
+Disambiguation on `GET /v1/models` + `GET /v1/models/{model}`:
+- When downstream key is **Gemini style** (`x-goog-api-key` or `?key=`), treat as **Gemini v1**.
+
+### Provider internal downstream abilities
+- `GET /{provider}/oauth`
+- `GET /{provider}/oauth/callback`
+- `GET /{provider}/usage`
+  - Required query: `credential_id=<id>`.
+  - Usage is fetched against that specific credential under the provider.
+
+#### OAuth behavior notes
+
+##### codex (`device` flow)
+- `GET /codex/oauth`
+  - Starts Device Authorization flow against OpenAI.
+  - Returns: `mode=device`, `auth_url`, `verification_uri`, `user_code`, `interval`, `state`.
+- `GET /codex/oauth/callback`
+  - Uses `state` to continue flow (no `code` required).
+  - Polls device authorization status and exchanges token with `redirect_uri=https://auth.openai.com/deviceauth/callback`.
+  - If authorization is not completed yet, returns `409` with `error=authorization_pending: retry after <n>s`.
+
+##### claudecode (`manual` flow)
+- `GET /claudecode/oauth`
+  - Returns manual auth info: `mode=manual`, `auth_url`, `state`, `redirect_uri`.
+  - Default redirect: `https://platform.claude.com/oauth/code/callback`.
+- `GET /claudecode/oauth/callback`
+  - Accepts `?code=...` or `?callback_url=...` (manual `code` takes precedence).
+
+##### geminicli (`manual` flow)
+- `GET /geminicli/oauth`
+  - Returns manual auth info: `mode=manual`, `auth_url`, `state`, `redirect_uri`.
+  - Default redirect: `https://codeassist.google.com/authcode`.
+- `GET /geminicli/oauth/callback`
+  - Accepts `?code=...` or `?callback_url=...` (manual `code` takes precedence).
+
+##### antigravity (`manual` flow)
+- `GET /antigravity/oauth`
+  - Returns manual auth info: `mode=manual`, `auth_url`, `state`, `redirect_uri`.
+  - Default redirect: `http://localhost:51121/oauth-callback`.
+- `GET /antigravity/oauth/callback`
+  - Accepts `?code=...` or `?callback_url=...` (manual `code` takes precedence).
+
+##### state resolution rules
+- Explicit `state` is preferred when provided.
+- If `state` is omitted and exactly one pending OAuth state exists, that state is used.
+- If `state` is omitted and multiple pending states exist, callback returns `400` with `error=ambiguous_state`.
+
+
+## Admin (/admin/...)
+
+### Auth (admin)
+Accepted admin key sources (first match wins):
+- `x-admin-key: <key>`
+- `Authorization: Bearer <key>`
+
+### Routes
+- `GET /admin/health`
+- `GET /admin/global_config`
+- `PUT /admin/global_config`
+
+- `GET /admin/providers`
+- `GET /admin/providers/{name}`
+- `PUT /admin/providers/{name}`
+- `DELETE /admin/providers/{name}` (custom only; builtin must be disabled)
+
+- `GET /admin/providers/{name}/credentials`
+- `POST /admin/providers/{name}/credentials`
+
+- `GET /admin/credentials`
+- `PUT /admin/credentials/{id}`
+- `DELETE /admin/credentials/{id}`
+- `PUT /admin/credentials/{id}/enabled`
+
+- `GET /admin/usage/providers/{provider}/tokens?from=<RFC3339>&to=<RFC3339>`
+- `GET /admin/usage/providers/{provider}/models/{model}/tokens?from=<RFC3339>&to=<RFC3339>`
+- `GET /admin/usage/credentials/{credential_id}/tokens?from=<RFC3339>&to=<RFC3339>`
+- `GET /admin/usage/credentials/{credential_id}/models/{model}/tokens?from=<RFC3339>&to=<RFC3339>`
+
+- `GET /admin/users`
+- `PUT /admin/users/{id}`
+- `DELETE /admin/users/{id}`
+- `PUT /admin/users/{id}/enabled`
+
+- `GET /admin/users/{id}/keys`
+- `POST /admin/users/{id}/keys`
+- `PUT /admin/user_keys/{id}`
+- `DELETE /admin/user_keys/{id}`
+- `PUT /admin/user_keys/{id}/enabled`
+
+- `GET /admin/events/ws`
+
+Note: usage records are persisted in DB table `upstream_usages` (not `upstream_requests.usage_json`).
+Note: `upstream_usages` includes a `model` column. Model-scoped usage routes filter by this column.
+Note: `model` can be `NULL` for historical rows when request body/path did not contain model info, or when `event_redact_sensitive=true` (request body not persisted, so model cannot be extracted/backfilled).

@@ -107,10 +107,11 @@ impl OpenAIToClaudeChatCompletionStreamState {
         let finish_reason = choice.and_then(|choice| choice.finish_reason.map(map_finish_reason));
 
         if let Some(reason) = finish_reason
-            && !self.finish_emitted {
-                events.extend(self.close_open_blocks());
-                self.pending_finish = Some(reason);
-            }
+            && !self.finish_emitted
+        {
+            events.extend(self.close_open_blocks());
+            self.pending_finish = Some(reason);
+        }
 
         if let Some(usage) = usage {
             if let Some(reason) = self.pending_finish.take() {
@@ -120,6 +121,7 @@ impl OpenAIToClaudeChatCompletionStreamState {
                         stop_sequence: None,
                     },
                     usage,
+                    context_management: None,
                 }));
                 events.push(BetaStreamEvent::Known(BetaStreamEventKnown::MessageStop));
                 self.finish_emitted = true;
@@ -130,6 +132,7 @@ impl OpenAIToClaudeChatCompletionStreamState {
                         stop_sequence: None,
                     },
                     usage,
+                    context_management: None,
                 }));
             }
         }

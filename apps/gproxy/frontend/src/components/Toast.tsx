@@ -1,31 +1,13 @@
-import React from "react";
 
-export type ToastType = "success" | "error" | "info" | "warning";
-
-export type ToastState = {
-  type: ToastType;
-  message: string;
-} | null;
-
-const COLOR_MAP: Record<ToastType, string> = {
-  success: "bg-emerald-600",
-  error: "bg-rose-600",
-  info: "bg-sky-600",
-  warning: "bg-amber-500"
-};
+import type { ToastState } from "../lib/types";
 
 export function Toast({ toast }: { toast: ToastState }) {
   if (!toast) {
     return null;
   }
-
   return (
-    <div
-      className={`fixed right-6 top-6 z-50 rounded-2xl px-4 py-3 text-sm font-semibold text-white shadow-xl ${
-        COLOR_MAP[toast.type]
-      }`}
-    >
-      {toast.message}
+    <div className="fixed right-4 top-4 z-50">
+      <div className={`toast toast-${toast.kind}`}>{toast.message}</div>
     </div>
   );
 }

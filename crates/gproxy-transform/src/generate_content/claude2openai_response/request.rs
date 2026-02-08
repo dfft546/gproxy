@@ -44,8 +44,14 @@ pub fn transform_request(request: ClaudeCreateMessageRequest) -> OpenAIResponseR
     let tools = map_tools(request.body.tools, request.body.mcp_servers);
     let (tool_choice, parallel_tool_calls) = map_tool_choice(request.body.tool_choice);
 
-    let reasoning = map_reasoning(request.body.thinking, request.body.output_config);
-    let text = map_output_format(request.body.output_format);
+    let reasoning = map_reasoning(request.body.thinking, request.body.output_config.clone());
+    let output_format = request
+        .body
+        .output_config
+        .as_ref()
+        .and_then(|config| config.format.clone())
+        .or(request.body.output_format);
+    let text = map_output_format(output_format);
 
     OpenAIResponseRequest {
         body: OpenAIResponseRequestBody {
@@ -461,6 +467,7 @@ fn map_reasoning(
             Some(ClaudeOutputEffort::Low) => ReasoningEffort::Low,
             Some(ClaudeOutputEffort::Medium) => ReasoningEffort::Medium,
             Some(ClaudeOutputEffort::High) => ReasoningEffort::High,
+            Some(ClaudeOutputEffort::Max) => ReasoningEffort::XHigh,
             None => ReasoningEffort::Medium,
         }
     };

@@ -91,7 +91,11 @@ impl ClaudeToOpenAIChatCompletionStreamState {
             BetaStreamEventKnown::ContentBlockDelta { index, delta } => self
                 .map_block_delta(index, delta)
                 .map(ClaudeToOpenAIChatCompletionStreamEvent::Chunk),
-            BetaStreamEventKnown::MessageDelta { delta, usage } => {
+            BetaStreamEventKnown::MessageDelta {
+                delta,
+                usage,
+                context_management: _,
+            } => {
                 let finish_reason = delta.stop_reason.map(map_finish_reason);
                 if finish_reason.is_some() {
                     self.finish_emitted = true;
@@ -213,6 +217,7 @@ impl ClaudeToOpenAIChatCompletionStreamState {
                     Some(self.tool_call_delta(index, partial_json))
                 }
             }
+            BetaStreamContentBlockDelta::CitationsDelta { .. } => None,
             BetaStreamContentBlockDelta::SignatureDelta { .. } => None,
         }
     }

@@ -183,7 +183,11 @@ impl OpenAIChatCompletionToGeminiStreamState {
         vec![self.build_response(choice_index, parts_snapshot, None)]
     }
 
-    fn finish_choice(&mut self, choice_index: i64, finish_reason: FinishReason) -> GenerateContentResponse {
+    fn finish_choice(
+        &mut self,
+        choice_index: i64,
+        finish_reason: FinishReason,
+    ) -> GenerateContentResponse {
         let parts = self.content_parts.remove(&choice_index).unwrap_or_default();
         self.build_response(choice_index, parts, Some(finish_reason))
     }
@@ -220,7 +224,6 @@ impl OpenAIChatCompletionToGeminiStreamState {
         }
     }
 
-
     fn update_from_chunk(&mut self, chunk: &CreateChatCompletionStreamResponse) {
         self.response_id = chunk.id.clone();
         self.model_version = map_model_version(&chunk.model);
@@ -248,7 +251,6 @@ fn text_part(text: String) -> GeminiPart {
         video_metadata: None,
     }
 }
-
 
 fn map_finish_reason(reason: ChatCompletionFinishReason) -> FinishReason {
     match reason {

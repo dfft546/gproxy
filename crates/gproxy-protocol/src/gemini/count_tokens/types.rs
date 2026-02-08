@@ -13,6 +13,7 @@ pub enum ContentRole {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Content {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<Part>,
     /// Must be either 'user' or 'model'.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -682,6 +682,7 @@ fn map_reasoning(
     let output_effort = reasoning.effort.and_then(map_output_effort);
     let output_config = output_effort.map(|effort| ClaudeOutputConfig {
         effort: Some(effort),
+        format: None,
     });
 
     let thinking = match reasoning.effort {

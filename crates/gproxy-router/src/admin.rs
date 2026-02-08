@@ -1,0 +1,1148 @@
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::Json;
+use axum::Router;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post, put};
+use serde::Deserialize;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::select;
+
+use gproxy_core::state::{AppState, CredentialInsertInput, ProviderRuntime};
+use gproxy_provider_core::{Credential, CredentialState, ProviderConfig, UnavailableReason};
+use gproxy_storage::Storage;
+
+#[derive(Clone)]
+pub struct AdminState {
+    pub app: Arc<AppState>,
+    pub storage: Arc<dyn Storage>,
+}
+
+pub fn admin_router(app: Arc<AppState>, storage: Arc<dyn Storage>) -> Router {
+    let state = AdminState { app, storage };
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/global_config", get(get_global).put(put_global))
+        .route("/providers", get(list_providers))
+        .route(
+            "/providers/{name}",
+            get(get_provider)
+                .put(upsert_provider)
+                .delete(delete_provider),
+        )
+        .route(
+            "/providers/{name}/credentials",
+            get(list_provider_credentials).post(insert_credential),
+        )
+        .route("/credentials/{id}/enabled", put(set_credential_enabled))
+        .route(
+            "/credentials/{id}",
+            put(update_credential).delete(delete_credential),
+        )
+        .route("/credentials", get(list_credentials))
+        .route(
+            "/usage/providers/{provider}/tokens",
+            get(usage_tokens_by_provider),
+        )
+        .route(
+            "/usage/providers/{provider}/models/{model}/tokens",
+            get(usage_tokens_by_provider_model),
+        )
+        .route(
+            "/usage/credentials/{credential_id}/tokens",
+            get(usage_tokens_by_credential),
+        )
+        .route(
+            "/usage/credentials/{credential_id}/models/{model}/tokens",
+            get(usage_tokens_by_credential_model),
+        )
+        .route("/users", get(list_users))
+        .route("/users/{id}", put(upsert_user).delete(delete_user))
+        .route("/users/{id}/enabled", put(set_user_enabled))
+        .route(
+            "/users/{id}/keys",
+            post(insert_user_key).get(list_user_keys),
+        )
+        .route("/user_keys/{id}/enabled", put(set_user_key_enabled))
+        .route(
+            "/user_keys/{id}",
+            put(update_user_key).delete(delete_user_key),
+        )
+        .route("/events/ws", get(events_ws))
+        .layer(middleware::from_fn_with_state(state.clone(), admin_auth))
+        .with_state(state)
+}
+
+async fn admin_auth(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let key = extract_admin_key(&headers, req.uri()).ok_or(StatusCode::UNAUTHORIZED)?;
+    let given_hash = blake3::hash(key.as_bytes()).to_hex().to_string();
+    let expected_hash = state.app.global.load().admin_key_hash.clone();
+    if given_hash != expected_hash {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}
+
+fn extract_admin_key(headers: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
+    if let Some(value) = headers.get("x-admin-key")
+        && let Ok(s) = value.to_str()
+    {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+
+    if let Some(value) = headers.get(header::AUTHORIZATION)
+        && let Ok(auth) = value.to_str()
+    {
+        let auth = auth.trim();
+        let prefix = "Bearer ";
+        if auth.len() > prefix.len() && auth[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            let token = auth[prefix.len()..].trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    let query = uri.query()?;
+    let parsed: std::collections::HashMap<String, String> =
+        serde_urlencoded::from_str(query).ok()?;
+    let key = parsed.get("admin_key")?.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
+async fn get_global(State(state): State<AdminState>) -> impl IntoResponse {
+    let global = state.app.global.load();
+    Json(serde_json::json!({
+        "host": global.host,
+        "port": global.port,
+        "proxy": global.proxy,
+        "dsn": global.dsn,
+        "event_redact_sensitive": global.event_redact_sensitive,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct PutGlobalBody {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub proxy: Option<String>,
+    pub event_redact_sensitive: Option<bool>,
+}
+
+async fn put_global(
+    State(state): State<AdminState>,
+    Json(body): Json<PutGlobalBody>,
+) -> impl IntoResponse {
+    let patch = gproxy_common::GlobalConfigPatch {
+        host: body.host,
+        port: body.port,
+        admin_key_hash: None,
+        proxy: body.proxy,
+        dsn: None,
+        event_redact_sensitive: body.event_redact_sensitive,
+    };
+
+    // DB commit -> in-memory apply (strong consistency).
+    let current = state.app.global.load().as_ref().clone();
+    let mut merged = gproxy_common::GlobalConfigPatch::from(current);
+    merged.overlay(patch);
+    let next = match merged.into_config() {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_global_config", "detail": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(err) = state.storage.upsert_global_config(&next).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_global_config(next);
+
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn list_providers(State(state): State<AdminState>) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let providers: Vec<_> = snapshot
+        .providers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "enabled": p.enabled,
+                "updated_at": p.updated_at,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "providers": providers }))
+}
+
+async fn get_provider(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let Some(p) = snapshot.providers.iter().find(|p| p.name == name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "provider_not_found" })),
+        )
+            .into_response();
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": p.id,
+            "name": p.name,
+            "enabled": p.enabled,
+            "config_json": p.config_json,
+            "updated_at": p.updated_at,
+        })),
+    )
+        .into_response()
+}
+
+fn unavailable_reason_code(reason: UnavailableReason) -> &'static str {
+    match reason {
+        UnavailableReason::RateLimit => "rate_limit",
+        UnavailableReason::Timeout => "timeout",
+        UnavailableReason::Upstream5xx => "upstream_5xx",
+        UnavailableReason::AuthInvalid => "auth_invalid",
+        UnavailableReason::ModelDisallow => "model_disallow",
+        UnavailableReason::Manual => "manual",
+        UnavailableReason::Unknown => "unknown",
+    }
+}
+
+fn instant_remaining(until: tokio::time::Instant) -> Option<std::time::Duration> {
+    let now = tokio::time::Instant::now();
+    until.checked_duration_since(now)
+}
+
+fn until_epoch_millis(until: tokio::time::Instant) -> Option<i64> {
+    let remaining = instant_remaining(until)?;
+    let wall = SystemTime::now().checked_add(remaining)?;
+    let millis = wall.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    i64::try_from(millis).ok()
+}
+
+async fn build_runtime_status(
+    runtime: Option<&Arc<ProviderRuntime>>,
+    credential_id: i64,
+    enabled: bool,
+) -> serde_json::Value {
+    let Some(runtime) = runtime else {
+        return serde_json::json!({
+            "summary": if enabled { "active" } else { "disabled" },
+            "credential_unavailable": serde_json::Value::Null,
+            "model_unavailable": [],
+        });
+    };
+
+    let credential_unavailable = match runtime.pool.state(credential_id).await {
+        Some(CredentialState::Unavailable { until, reason }) => {
+            instant_remaining(until).map(|remaining| {
+                serde_json::json!({
+                    "reason": unavailable_reason_code(reason),
+                    "remaining_secs": remaining.as_secs(),
+                    "remaining_ms": remaining.as_millis(),
+                    "until_epoch_ms": until_epoch_millis(until),
+                })
+            })
+        }
+        _ => None,
+    };
+
+    let model_unavailable_rows = runtime
+        .pool
+        .model_states(credential_id)
+        .await
+        .into_iter()
+        .filter_map(|(model, until, reason)| {
+            let remaining = instant_remaining(until)?;
+            Some(serde_json::json!({
+                "model": model,
+                "reason": unavailable_reason_code(reason),
+                "remaining_secs": remaining.as_secs(),
+                "remaining_ms": remaining.as_millis(),
+                "until_epoch_ms": until_epoch_millis(until),
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    let summary = if !enabled {
+        "disabled"
+    } else if credential_unavailable.is_some() {
+        "fully_unavailable"
+    } else if !model_unavailable_rows.is_empty() {
+        "partial_unavailable"
+    } else {
+        "active"
+    };
+
+    serde_json::json!({
+        "summary": summary,
+        "credential_unavailable": credential_unavailable,
+        "model_unavailable": model_unavailable_rows,
+    })
+}
+
+async fn list_provider_credentials(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let provider = snapshot.providers.iter().find(|p| p.name == name);
+    let Some(provider) = provider else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "provider_not_found" })),
+        )
+            .into_response();
+    };
+
+    let runtime = state.app.providers.load().get(&name).cloned();
+    let mut creds = Vec::new();
+    for c in snapshot.credentials.iter().filter(|c| c.provider_id == provider.id) {
+        let runtime_status = build_runtime_status(runtime.as_ref(), c.id, c.enabled).await;
+        creds.push(serde_json::json!({
+            "id": c.id,
+            "name": c.name,
+            "settings_json": c.settings_json,
+            "secret_json": c.secret_json,
+            "enabled": c.enabled,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+            "runtime_status": runtime_status,
+        }));
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "credentials": creds })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertProviderBody {
+    pub enabled: bool,
+    pub config_json: serde_json::Value,
+}
+
+async fn upsert_provider(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    Json(body): Json<UpsertProviderBody>,
+) -> impl IntoResponse {
+    let id = match state
+        .storage
+        .upsert_provider(&name, &body.config_json, body.enabled)
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    state
+        .app
+        .apply_provider_upsert(id, name.clone(), body.config_json, body.enabled);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": id, "name": name })),
+    )
+        .into_response()
+}
+
+async fn delete_provider(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Only allow deleting custom providers. Builtin/bulletin providers must be disabled instead.
+    let snapshot = state.app.snapshot.load();
+    let provider = snapshot.providers.iter().find(|p| p.name == name);
+    let Some(provider) = provider else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "provider_not_found" })),
+        )
+            .into_response();
+    };
+    let cfg: ProviderConfig = match serde_json::from_value(provider.config_json.clone()) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "provider_config_invalid", "detail": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if !matches!(cfg, ProviderConfig::Custom(_)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "only_custom_provider_can_be_deleted" })),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = state.storage.delete_provider(&name).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_provider_delete(&name);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct InsertCredentialBody {
+    pub name: Option<String>,
+    #[serde(default = "default_object")]
+    pub settings_json: serde_json::Value,
+    pub secret_json: serde_json::Value,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+async fn insert_credential(
+    State(state): State<AdminState>,
+    Path(provider_name): Path<String>,
+    Json(body): Json<InsertCredentialBody>,
+) -> impl IntoResponse {
+    // Validate provider exists in memory (snapshot + runtime map).
+    let snapshot = state.app.snapshot.load();
+    let provider = snapshot.providers.iter().find(|p| p.name == provider_name);
+    let Some(provider) = provider else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "provider_not_found" })),
+        )
+            .into_response();
+    };
+
+    // Validate secret_json is a known Credential variant and matches provider config kind.
+    let cred: Credential = match serde_json::from_value(body.secret_json.clone()) {
+        Ok(c) => c,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_credential_json",
+                    "detail": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse provider config to enforce credential kind (best-effort).
+    let runtime = state.app.providers.load().get(&provider_name).cloned();
+    if let Some(runtime) = runtime
+        && let Ok(cfg) =
+            serde_json::from_value::<ProviderConfig>(runtime.config_json.load().as_ref().clone())
+        && !credential_matches_provider(&cred, &cfg)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "credential_kind_mismatch" })),
+        )
+            .into_response();
+    }
+
+    let id = match state
+        .storage
+        .insert_credential(
+            &provider_name,
+            body.name.as_deref(),
+            &body.settings_json,
+            &body.secret_json,
+            body.enabled,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    if let Err(err) = state
+        .app
+        .apply_credential_insert(CredentialInsertInput {
+            id,
+            provider_name,
+            provider_id: provider.id,
+            name: body.name,
+            settings_json: body.settings_json,
+            secret_json: body.secret_json,
+            enabled: body.enabled,
+        })
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "apply_memory_failed", "detail": err.to_string() })),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "id": id }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct SetEnabledBody {
+    pub enabled: bool,
+}
+
+async fn set_credential_enabled(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetEnabledBody>,
+) -> impl IntoResponse {
+    if let Err(err) = state.storage.set_credential_enabled(id, body.enabled).await {
+        return storage_error(err).into_response();
+    }
+
+    if let Err(err) = state.app.apply_credential_enabled(id, body.enabled).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "apply_memory_failed", "detail": err.to_string() })),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn delete_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    // Ensure it won't be acquired anymore after deletion.
+    {
+        let snapshot = state.app.snapshot.load();
+        if let Some(row) = snapshot.credentials.iter().find(|c| c.id == id)
+            && let Some(provider_name) = snapshot
+                .providers
+                .iter()
+                .find(|p| p.id == row.provider_id)
+                .map(|p| p.name.clone())
+            && let Some(runtime) = state.app.providers.load().get(&provider_name).cloned()
+        {
+            runtime.pool.set_enabled(&provider_name, id, false).await;
+        }
+    }
+
+    if let Err(err) = state.storage.delete_credential(id).await {
+        return storage_error(err).into_response();
+    }
+
+    // Best-effort: remove from snapshot. Pool removal is handled by disabling before delete.
+    state.app.apply_credential_delete(id);
+
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCredentialBody {
+    pub name: Option<String>,
+    pub settings_json: Option<serde_json::Value>,
+    pub secret_json: serde_json::Value,
+}
+
+async fn update_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateCredentialBody>,
+) -> impl IntoResponse {
+    // Validate secret_json is a known Credential variant.
+    let cred: Credential = match serde_json::from_value(body.secret_json.clone()) {
+        Ok(c) => c,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_credential_json",
+                    "detail": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate provider kind matches existing provider config kind.
+    let snapshot = state.app.snapshot.load();
+    let existing = snapshot.credentials.iter().find(|c| c.id == id);
+    let Some(existing) = existing else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "credential_not_found" })),
+        )
+            .into_response();
+    };
+    let provider_name = snapshot
+        .providers
+        .iter()
+        .find(|p| p.id == existing.provider_id)
+        .map(|p| p.name.clone());
+    let Some(provider_name) = provider_name else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "provider_not_found" })),
+        )
+            .into_response();
+    };
+    let runtime = state.app.providers.load().get(&provider_name).cloned();
+    if let Some(runtime) = runtime
+        && let Ok(cfg) =
+            serde_json::from_value::<ProviderConfig>(runtime.config_json.load().as_ref().clone())
+        && !credential_matches_provider(&cred, &cfg)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "credential_kind_mismatch" })),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = state
+        .storage
+        .update_credential(
+            id,
+            body.name.as_deref(),
+            body.settings_json
+                .as_ref()
+                .unwrap_or(&existing.settings_json),
+            &body.secret_json,
+        )
+        .await
+    {
+        return storage_error(err).into_response();
+    }
+
+    if let Err(err) = state
+        .app
+        .apply_credential_update(
+            id,
+            body.name,
+            body.settings_json.unwrap_or(existing.settings_json.clone()),
+            body.secret_json,
+        )
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "apply_memory_failed", "detail": err.to_string() })),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn list_credentials(State(state): State<AdminState>) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let provider_map: std::collections::HashMap<i64, String> = snapshot
+        .providers
+        .iter()
+        .map(|p| (p.id, p.name.clone()))
+        .collect();
+    let runtime_map = state.app.providers.load();
+    let mut creds = Vec::new();
+    for c in &snapshot.credentials {
+        let runtime = provider_map
+            .get(&c.provider_id)
+            .and_then(|provider_name| runtime_map.get(provider_name).cloned());
+        let runtime_status = build_runtime_status(runtime.as_ref(), c.id, c.enabled).await;
+        creds.push(serde_json::json!({
+            "id": c.id,
+            "provider_id": c.provider_id,
+            "name": c.name,
+            "settings_json": c.settings_json,
+            "secret_json": c.secret_json,
+            "enabled": c.enabled,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+            "runtime_status": runtime_status,
+        }));
+    }
+    Json(serde_json::json!({ "credentials": creds }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageRangeQuery {
+    from: String,
+    to: String,
+}
+
+async fn usage_tokens_by_provider(
+    State(state): State<AdminState>,
+    Path(provider): Path<String>,
+    Query(query): Query<UsageRangeQuery>,
+) -> impl IntoResponse {
+    let (from, to) = match parse_usage_range(&query) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_response(),
+    };
+
+    let aggregate = match state
+        .storage
+        .aggregate_usage_tokens(gproxy_storage::UsageAggregateFilter {
+            from,
+            to,
+            provider: Some(provider.clone()),
+            credential_id: None,
+            model: None,
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "scope": "provider",
+            "provider": provider,
+            "from": query.from,
+            "to": query.to,
+            "matched_rows": aggregate.matched_rows,
+            "input_tokens": aggregate.input_tokens,
+            "output_tokens": aggregate.output_tokens,
+            "cache_read_input_tokens": aggregate.cache_read_input_tokens,
+            "cache_creation_input_tokens": aggregate.cache_creation_input_tokens,
+            "total_tokens": aggregate.total_tokens,
+        })),
+    )
+        .into_response()
+}
+
+async fn usage_tokens_by_provider_model(
+    State(state): State<AdminState>,
+    Path((provider, model)): Path<(String, String)>,
+    Query(query): Query<UsageRangeQuery>,
+) -> impl IntoResponse {
+    let (from, to) = match parse_usage_range(&query) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_response(),
+    };
+
+    let aggregate = match state
+        .storage
+        .aggregate_usage_tokens(gproxy_storage::UsageAggregateFilter {
+            from,
+            to,
+            provider: Some(provider.clone()),
+            credential_id: None,
+            model: Some(model.clone()),
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "scope": "provider_model",
+            "provider": provider,
+            "model": model,
+            "from": query.from,
+            "to": query.to,
+            "matched_rows": aggregate.matched_rows,
+            "input_tokens": aggregate.input_tokens,
+            "output_tokens": aggregate.output_tokens,
+            "cache_read_input_tokens": aggregate.cache_read_input_tokens,
+            "cache_creation_input_tokens": aggregate.cache_creation_input_tokens,
+            "total_tokens": aggregate.total_tokens,
+        })),
+    )
+        .into_response()
+}
+
+async fn usage_tokens_by_credential(
+    State(state): State<AdminState>,
+    Path(credential_id): Path<i64>,
+    Query(query): Query<UsageRangeQuery>,
+) -> impl IntoResponse {
+    let (from, to) = match parse_usage_range(&query) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_response(),
+    };
+
+    let aggregate = match state
+        .storage
+        .aggregate_usage_tokens(gproxy_storage::UsageAggregateFilter {
+            from,
+            to,
+            provider: None,
+            credential_id: Some(credential_id),
+            model: None,
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "scope": "credential",
+            "credential_id": credential_id,
+            "from": query.from,
+            "to": query.to,
+            "matched_rows": aggregate.matched_rows,
+            "input_tokens": aggregate.input_tokens,
+            "output_tokens": aggregate.output_tokens,
+            "cache_read_input_tokens": aggregate.cache_read_input_tokens,
+            "cache_creation_input_tokens": aggregate.cache_creation_input_tokens,
+            "total_tokens": aggregate.total_tokens,
+        })),
+    )
+        .into_response()
+}
+
+async fn usage_tokens_by_credential_model(
+    State(state): State<AdminState>,
+    Path((credential_id, model)): Path<(i64, String)>,
+    Query(query): Query<UsageRangeQuery>,
+) -> impl IntoResponse {
+    let (from, to) = match parse_usage_range(&query) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_response(),
+    };
+
+    let aggregate = match state
+        .storage
+        .aggregate_usage_tokens(gproxy_storage::UsageAggregateFilter {
+            from,
+            to,
+            provider: None,
+            credential_id: Some(credential_id),
+            model: Some(model.clone()),
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "scope": "credential_model",
+            "credential_id": credential_id,
+            "model": model,
+            "from": query.from,
+            "to": query.to,
+            "matched_rows": aggregate.matched_rows,
+            "input_tokens": aggregate.input_tokens,
+            "output_tokens": aggregate.output_tokens,
+            "cache_read_input_tokens": aggregate.cache_read_input_tokens,
+            "cache_creation_input_tokens": aggregate.cache_creation_input_tokens,
+            "total_tokens": aggregate.total_tokens,
+        })),
+    )
+        .into_response()
+}
+
+async fn list_users(State(state): State<AdminState>) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let users: Vec<_> = snapshot
+        .users
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "id": u.id,
+                "name": u.name,
+                "enabled": u.enabled,
+                "created_at": u.created_at,
+                "updated_at": u.updated_at,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "users": users }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertUserBody {
+    pub name: String,
+    pub enabled: bool,
+}
+
+async fn upsert_user(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpsertUserBody>,
+) -> impl IntoResponse {
+    if let Err(err) = state
+        .storage
+        .upsert_user_by_id(id, &body.name, body.enabled)
+        .await
+    {
+        return storage_error(err).into_response();
+    }
+    state
+        .app
+        .apply_user_upsert(id, body.name.clone(), body.enabled);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": id, "name": body.name })),
+    )
+        .into_response()
+}
+
+async fn delete_user(State(state): State<AdminState>, Path(id): Path<i64>) -> impl IntoResponse {
+    if let Err(err) = state.storage.delete_user(id).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_user_delete(id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn set_user_enabled(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetEnabledBody>,
+) -> impl IntoResponse {
+    if let Err(err) = state.storage.set_user_enabled(id, body.enabled).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_user_enabled(id, body.enabled);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct InsertUserKeyBody {
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+async fn insert_user_key(
+    State(state): State<AdminState>,
+    Path(user_id): Path<i64>,
+    Json(body): Json<InsertUserKeyBody>,
+) -> impl IntoResponse {
+    let key_plain = body.key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let key_hash = blake3::hash(key_plain.as_bytes()).to_hex().to_string();
+
+    let id = match state
+        .storage
+        .insert_user_key(user_id, &key_hash, body.label.as_deref(), body.enabled)
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => return storage_error(err).into_response(),
+    };
+
+    state
+        .app
+        .apply_user_key_insert(id, user_id, key_hash, body.label, body.enabled);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": id, "key": key_plain })),
+    )
+        .into_response()
+}
+
+async fn list_user_keys(
+    State(state): State<AdminState>,
+    Path(user_id): Path<i64>,
+) -> impl IntoResponse {
+    let snapshot = state.app.snapshot.load();
+    let keys: Vec<_> = snapshot
+        .user_keys
+        .iter()
+        .filter(|k| k.user_id == user_id)
+        .map(|k| {
+            serde_json::json!({
+                "id": k.id,
+                "user_id": k.user_id,
+                "label": k.label,
+                "enabled": k.enabled,
+                "created_at": k.created_at,
+                "updated_at": k.updated_at,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "keys": keys }))
+}
+
+async fn set_user_key_enabled(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetEnabledBody>,
+) -> impl IntoResponse {
+    if let Err(err) = state.storage.set_user_key_enabled(id, body.enabled).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_user_key_enabled(id, body.enabled);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateUserKeyBody {
+    pub label: Option<String>,
+}
+
+async fn update_user_key(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateUserKeyBody>,
+) -> impl IntoResponse {
+    if let Err(err) = state
+        .storage
+        .update_user_key_label(id, body.label.as_deref())
+        .await
+    {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_user_key_label(id, body.label);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn delete_user_key(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(err) = state.storage.delete_user_key(id).await {
+        return storage_error(err).into_response();
+    }
+    state.app.apply_user_key_delete(id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn events_ws(ws: WebSocketUpgrade, State(state): State<AdminState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_events_ws(socket, state.app.clone()))
+}
+
+async fn handle_events_ws(mut socket: WebSocket, app: Arc<AppState>) {
+    let mut rx = app.events.subscribe();
+
+    loop {
+        select! {
+            msg = socket.recv() => {
+                // If peer disconnects or errors, stop.
+                if msg.is_none() {
+                    break;
+                }
+            }
+            evt = rx.recv() => {
+                let Ok(evt) = evt else {
+                    break;
+                };
+                if let Ok(text) = serde_json::to_string(&evt)
+                    && socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+            }
+        }
+    }
+}
+
+fn credential_matches_provider(cred: &Credential, cfg: &ProviderConfig) -> bool {
+    use gproxy_provider_core::Credential as C;
+    use gproxy_provider_core::ProviderConfig as P;
+
+    matches!(
+        (cred, cfg),
+        (C::OpenAI(_), P::OpenAI(_))
+            | (C::Claude(_), P::Claude(_))
+            | (C::AIStudio(_), P::AIStudio(_))
+            | (C::VertexExpress(_), P::VertexExpress(_))
+            | (C::Vertex(_), P::Vertex(_))
+            | (C::GeminiCli(_), P::GeminiCli(_))
+            | (C::ClaudeCode(_), P::ClaudeCode(_))
+            | (C::Codex(_), P::Codex(_))
+            | (C::Antigravity(_), P::Antigravity(_))
+            | (C::Nvidia(_), P::Nvidia(_))
+            | (C::DeepSeek(_), P::DeepSeek(_))
+            | (C::Custom(_), P::Custom(_))
+    )
+}
+
+fn parse_usage_range(
+    query: &UsageRangeQuery,
+) -> Result<(OffsetDateTime, OffsetDateTime), (StatusCode, Json<serde_json::Value>)> {
+    let from = match OffsetDateTime::parse(&query.from, &Rfc3339) {
+        Ok(v) => v,
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_from",
+                    "detail": err.to_string(),
+                })),
+            ));
+        }
+    };
+    let to = match OffsetDateTime::parse(&query.to, &Rfc3339) {
+        Ok(v) => v,
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_to",
+                    "detail": err.to_string(),
+                })),
+            ));
+        }
+    };
+    if to < from {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_range",
+                "detail": "`to` must be >= `from`",
+            })),
+        ));
+    }
+    Ok((from, to))
+}
+
+fn storage_error(err: gproxy_storage::StorageError) -> (StatusCode, Json<serde_json::Value>) {
+    // TODO: map common unique constraint errors to 409.
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "storage_error", "detail": err.to_string() })),
+    )
+}

@@ -4,17 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 gproxy-core = { path = "../../crates/gproxy-core" }
-gproxy-provider-core = { path = "../../crates/gproxy-provider-core" }
-gproxy-provider-impl = { path = "../../crates/gproxy-provider-impl" }
-gproxy-storage = { path = "../../crates/gproxy-storage" }
-axum = { version = "0.8", features = ["http2"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-time = "0.3"
-rust-embed = { version = "8", features = ["axum-ex", "compression", "include-exclude"] }
+gproxy-router = { path = "../../crates/gproxy-router" }
+axum = { version = "0.8", features = ["ws"] }
+rust-embed = "8"
 mime_guess = "2"

@@ -7,7 +7,12 @@ use time::OffsetDateTime;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    pub config_json: Json,
+    pub host: String,
+    pub port: i32,
+    pub admin_key_hash: String,
+    pub proxy: Option<String>,
+    pub dsn: String,
+    pub event_redact_sensitive: Option<bool>,
     pub updated_at: OffsetDateTime,
 }
 

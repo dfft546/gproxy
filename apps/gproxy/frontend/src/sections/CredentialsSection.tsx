@@ -1,474 +1,386 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
-import Panel from "../components/Panel";
-import JsonBlock from "../components/JsonBlock";
-import { apiErrorMessage, apiRequest } from "../lib/api";
-import { formatTimestamp, maskValue } from "../lib/format";
-import type { Credential, Provider } from "../lib/types";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-type CredentialFormState = {
-  providerId: string;
-  name: string;
-  weight: string;
-  enabled: boolean;
-  secretText: string;
-  metaText: string;
+import { request, formatApiError, safeParseJson } from "../lib/api";
+import type { CredentialRow, ProviderDetail } from "../lib/types";
+import {
+  buildCredentialSecret,
+  credentialFieldMap,
+  extractCredentialFields,
+  kindFromConfig,
+  type FieldSpec
+} from "../lib/provider_schema";
+import { Badge, Button, Card, FieldLabel, TextArea, TextInput } from "../components/ui";
+import { useI18n } from "../i18n";
+
+type Props = {
+  adminKey: string;
+  notify: (kind: "success" | "error" | "info", message: string) => void;
 };
 
-const emptyForm: CredentialFormState = {
-  providerId: "",
-  name: "",
-  weight: "1",
-  enabled: true,
-  secretText: "{}",
-  metaText: "{}"
-};
-
-const readFileAsText = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsText(file);
-  });
-
-function parseJson(text: string, fallback: unknown) {
-  if (!text.trim()) {
-    return fallback;
+function looksLikeTaggedCredential(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return false;
   }
-  return JSON.parse(text);
+  return Object.keys(value).length === 1;
 }
 
-export default function CredentialsSection({
-  adminKey,
-  notify
-}: {
-  adminKey: string;
-  notify: (toast: { type: "success" | "error" | "info" | "warning"; message: string }) => void;
-}) {
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [credentials, setCredentials] = useState<Credential[]>([]);
-  const [loading, setLoading] = useState(false);
+export function CredentialsSection({ adminKey, notify }: Props) {
+  const { t } = useI18n();
+  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState("");
+  const [rows, setRows] = useState<CredentialRow[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<CredentialFormState>(emptyForm);
-  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
-  const [search, setSearch] = useState("");
-  const [filterProvider, setFilterProvider] = useState("all");
-  const [batchText, setBatchText] = useState("");
-  const [batchFiles, setBatchFiles] = useState<File[]>([]);
-  const deferredSearch = useDeferredValue(search);
+  const [displayName, setDisplayName] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [importKeys, setImportKeys] = useState("");
+  const [importFiles, setImportFiles] = useState<File[]>([]);
+
+  const provider = useMemo(
+    () => providers.find((item) => item.name === selectedProvider) ?? null,
+    [providers, selectedProvider]
+  );
+  const providerKind = provider ? kindFromConfig(provider.config_json) : null;
+  const fieldSpecs: FieldSpec[] = providerKind ? credentialFieldMap[providerKind] : [];
 
   const loadProviders = useCallback(async () => {
     try {
-      const data = await apiRequest<Provider[]>("/admin/providers", { adminKey });
-      const items = Array.isArray(data) ? data : [];
-      setProviders(items);
-      if (!form.providerId && items.length > 0) {
-        setForm((prev) => ({ ...prev, providerId: String(items[0].id) }));
+      const list = await request<{ providers: Array<{ name: string }> }>("/admin/providers", { adminKey });
+      const details = await Promise.all(
+        (list.providers ?? []).map((item) => request<ProviderDetail>(`/admin/providers/${item.name}`, { adminKey }))
+      );
+      setProviders(details);
+      if (!selectedProvider && details.length > 0) {
+        setSelectedProvider(details[0].name);
       }
     } catch (error) {
-      notify({ type: "error", message: apiErrorMessage(error) });
+      notify("error", formatApiError(error));
     }
-  }, [adminKey, form.providerId, notify]);
+  }, [adminKey, notify, selectedProvider]);
 
-  const loadCredentials = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await apiRequest<Credential[]>("/admin/credentials", { adminKey });
-      setCredentials(Array.isArray(data) ? data : []);
-    } catch (error) {
-      notify({ type: "error", message: apiErrorMessage(error) });
-    } finally {
-      setLoading(false);
-    }
-  }, [adminKey, notify]);
+  const loadCredentials = useCallback(
+    async (providerName: string) => {
+      if (!providerName) {
+        return;
+      }
+      setLoading(true);
+      try {
+        const data = await request<{ credentials: CredentialRow[] }>(
+          `/admin/providers/${providerName}/credentials`,
+          { adminKey }
+        );
+        setRows(data.credentials ?? []);
+      } catch (error) {
+        notify("error", formatApiError(error));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [adminKey, notify]
+  );
 
   useEffect(() => {
-    loadProviders();
-    loadCredentials();
-  }, [loadCredentials, loadProviders]);
+    void loadProviders();
+  }, [loadProviders]);
 
-  const providerMap = useMemo(() => {
-    const map = new Map<number, Provider>();
-    providers.forEach((provider) => map.set(provider.id, provider));
-    return map;
-  }, [providers]);
-
-  const filteredCredentials = useMemo(() => {
-    const term = deferredSearch.trim().toLowerCase();
-    return credentials.filter((cred) => {
-      if (filterProvider !== "all" && String(cred.provider_id) !== filterProvider) {
-        return false;
-      }
-      if (!term) {
-        return true;
-      }
-      const providerName = providerMap.get(cred.provider_id)?.name ?? "";
-      return (
-        String(cred.id).includes(term) ||
-        providerName.toLowerCase().includes(term) ||
-        (cred.name ?? "").toLowerCase().includes(term)
-      );
-    });
-  }, [credentials, deferredSearch, filterProvider, providerMap]);
-
-  const resetForm = () => {
-    setEditingId(null);
-    setForm((prev) => ({ ...emptyForm, providerId: prev.providerId || emptyForm.providerId }));
-  };
-
-  const handleEdit = (credential: Credential) => {
-    setEditingId(credential.id);
-    setForm({
-      providerId: String(credential.provider_id),
-      name: credential.name ?? "",
-      weight: String(credential.weight ?? 1),
-      enabled: credential.enabled,
-      secretText: JSON.stringify(credential.secret ?? {}, null, 2),
-      metaText: JSON.stringify(credential.meta_json ?? {}, null, 2)
-    });
-  };
-
-  const handleSubmit = async () => {
-    try {
-      if (!form.providerId) {
-        throw new Error("Provider is required.");
-      }
-      const payload = {
-        id: editingId ?? undefined,
-        provider_id: Number(form.providerId),
-        name: form.name.trim() ? form.name.trim() : null,
-        secret: parseJson(form.secretText, {}),
-        meta_json: parseJson(form.metaText, {}),
-        weight: Number(form.weight || 1),
-        enabled: form.enabled
-      };
-      if (Number.isNaN(payload.weight)) {
-        throw new Error("Weight must be a number.");
-      }
-      if (editingId) {
-        await apiRequest(`/admin/credentials/${editingId}`, {
-          method: "PUT",
-          body: payload,
-          adminKey
-        });
-        notify({ type: "success", message: "Credential updated." });
-      } else {
-        await apiRequest("/admin/credentials", {
-          method: "POST",
-          body: payload,
-          adminKey
-        });
-        notify({ type: "success", message: "Credential created." });
-      }
-      resetForm();
-      await loadCredentials();
-    } catch (error) {
-      notify({ type: "error", message: apiErrorMessage(error) });
+  useEffect(() => {
+    if (selectedProvider) {
+      void loadCredentials(selectedProvider);
+      setEditingId(null);
+      setDisplayName("");
+      setFields({});
+      setEnabled(true);
     }
-  };
+  }, [selectedProvider, loadCredentials]);
 
-  const handleDelete = async (credential: Credential) => {
-    if (!confirm(`Delete credential ${credential.id}?`)) {
+  const submit = async () => {
+    if (!provider || !providerKind) {
+      notify("error", t("errors.missing_provider"));
       return;
     }
     try {
-      await apiRequest(`/admin/credentials/${credential.id}`, {
-        method: "DELETE",
-        adminKey
-      });
-      notify({ type: "success", message: "Credential deleted." });
-      await loadCredentials();
+      const secretJson = buildCredentialSecret(providerKind, fields);
+      if (editingId) {
+        await request(`/admin/credentials/${editingId}`, {
+          method: "PUT",
+          adminKey,
+          body: {
+            name: displayName.trim() || null,
+            secret_json: secretJson
+          }
+        });
+        notify("success", t("credentials.update_ok"));
+      } else {
+        await request(`/admin/providers/${provider.name}/credentials`, {
+          method: "POST",
+          adminKey,
+          body: {
+            name: displayName.trim() || null,
+            settings_json: {},
+            secret_json: secretJson,
+            enabled
+          }
+        });
+        notify("success", t("credentials.create_ok"));
+      }
+      setEditingId(null);
+      setDisplayName("");
+      setFields({});
+      setEnabled(true);
+      await loadCredentials(provider.name);
     } catch (error) {
-      notify({ type: "error", message: apiErrorMessage(error) });
+      notify("error", formatApiError(error));
     }
   };
 
-  const handleBatchUpload = async () => {
+  const editRow = (row: CredentialRow) => {
+    if (!providerKind) {
+      return;
+    }
+    setEditingId(row.id);
+    setDisplayName(row.name ?? "");
+    setEnabled(row.enabled);
+    setFields(extractCredentialFields(providerKind, row.secret_json));
+  };
+
+  const removeRow = async (row: CredentialRow) => {
+    if (!confirm(`${t("common.delete")}? #${row.id}`)) {
+      return;
+    }
     try {
-      const payloads: unknown[] = [];
-      if (batchText.trim()) {
-        const parsed = JSON.parse(batchText);
-        if (Array.isArray(parsed)) {
-          payloads.push(...parsed);
-        } else {
-          payloads.push(parsed);
+      await request(`/admin/credentials/${row.id}`, { method: "DELETE", adminKey });
+      notify("success", t("credentials.delete_ok"));
+      await loadCredentials(selectedProvider);
+    } catch (error) {
+      notify("error", formatApiError(error));
+    }
+  };
+
+  const setRowEnabled = async (row: CredentialRow, nextEnabled: boolean) => {
+    try {
+      await request(`/admin/credentials/${row.id}/enabled`, {
+        method: "PUT",
+        adminKey,
+        body: { enabled: nextEnabled }
+      });
+      notify("success", t("credentials.toggle_ok"));
+      await loadCredentials(selectedProvider);
+    } catch (error) {
+      notify("error", formatApiError(error));
+    }
+  };
+
+  const runImport = async () => {
+    if (!provider || !providerKind) {
+      notify("error", t("errors.missing_provider"));
+      return;
+    }
+
+    try {
+      const payloads: Array<Record<string, unknown>> = [];
+
+      if (importKeys.trim()) {
+        const lines = importKeys
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        for (const line of lines) {
+          payloads.push(buildCredentialSecret(providerKind, { api_key: line }));
         }
       }
-      for (const file of batchFiles) {
-        const text = await readFileAsText(file);
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) {
-          payloads.push(...parsed);
-        } else {
-          payloads.push(parsed);
+
+      for (const file of importFiles) {
+        const text = await file.text();
+        const parsed = safeParseJson(text);
+        if (!parsed || typeof parsed !== "object") {
+          continue;
         }
+
+        if (looksLikeTaggedCredential(parsed)) {
+          payloads.push(parsed as Record<string, unknown>);
+          continue;
+        }
+
+        const simpleFields: Record<string, string> = {};
+        for (const spec of credentialFieldMap[providerKind]) {
+          const value = (parsed as Record<string, unknown>)[spec.key];
+          if (value !== undefined && value !== null) {
+            simpleFields[spec.key] = String(value);
+          }
+        }
+        payloads.push(buildCredentialSecret(providerKind, simpleFields));
       }
+
       if (payloads.length === 0) {
-        throw new Error("No payloads found.");
+        notify("info", t("common.empty"));
+        return;
       }
-      for (const payload of payloads) {
-        await apiRequest("/admin/credentials", {
+
+      for (const secret_json of payloads) {
+        await request(`/admin/providers/${provider.name}/credentials`, {
           method: "POST",
-          body: payload,
-          adminKey
+          adminKey,
+          body: {
+            name: null,
+            settings_json: {},
+            secret_json,
+            enabled: true
+          }
         });
       }
-      setBatchText("");
-      setBatchFiles([]);
-      notify({ type: "success", message: `Uploaded ${payloads.length} credential(s).` });
-      await loadCredentials();
+
+      setImportKeys("");
+      setImportFiles([]);
+      notify("success", t("credentials.import_ok"));
+      await loadCredentials(provider.name);
     } catch (error) {
-      notify({ type: "error", message: apiErrorMessage(error) });
+      notify("error", formatApiError(error));
     }
   };
 
+  const fieldLabel = (key: string) => t(`credentials.${key}`);
+
   return (
-    <div className="space-y-6">
-      <Panel
-        title={editingId ? "Edit credential" : "Add credential"}
-        subtitle="Create or update provider credentials and secrets."
+    <div className="space-y-5">
+      <Card
+        title={t("credentials.title")}
+        subtitle={t("credentials.subtitle")}
         action={
-          editingId ? (
-            <button className="btn btn-ghost" type="button" onClick={resetForm}>
-              Cancel edit
-            </button>
-          ) : null
+          <Button variant="neutral" onClick={() => void loadCredentials(selectedProvider)} disabled={!selectedProvider || loading}>
+            {t("common.refresh")}
+          </Button>
         }
       >
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="label">Provider</label>
+            <FieldLabel>{t("credentials.select_provider")}</FieldLabel>
             <select
-              className="select"
-              value={form.providerId}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, providerId: event.target.value }))
-              }
+              className="mt-2 select"
+              value={selectedProvider}
+              onChange={(event) => setSelectedProvider(event.target.value)}
             >
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name} (#{provider.id})
+              {providers.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
                 </option>
               ))}
             </select>
           </div>
-          <div>
-            <label className="label">Label</label>
-            <input
-              className="input"
-              value={form.name}
-              onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
-              placeholder="Optional label"
-            />
+          <div className="flex items-end gap-3">
+            <input id="credential-enabled" type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <label htmlFor="credential-enabled" className="text-sm text-slate-700">{t("common.enabled")}</label>
           </div>
-          <div>
-            <label className="label">Weight</label>
-            <input
-              className="input"
-              type="number"
-              value={form.weight}
-              onChange={(event) => setForm((prev) => ({ ...prev, weight: event.target.value }))}
-              min={0}
-            />
+          <div className="md:col-span-2">
+            <FieldLabel>{t("credentials.display_name")}</FieldLabel>
+            <div className="mt-2">
+              <TextInput value={displayName} onChange={setDisplayName} />
+            </div>
           </div>
-        </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <label className="label">Secret JSON</label>
-            <textarea
-              className="textarea"
-              rows={6}
-              value={form.secretText}
-              onChange={(event) => setForm((prev) => ({ ...prev, secretText: event.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="label">Meta JSON</label>
-            <textarea
-              className="textarea"
-              rows={6}
-              value={form.metaText}
-              onChange={(event) => setForm((prev) => ({ ...prev, metaText: event.target.value }))}
-            />
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-slate-600">
-            <input
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(event) => setForm((prev) => ({ ...prev, enabled: event.target.checked }))}
-            />
-            Enabled
-          </label>
-          <button className="btn btn-primary" type="button" onClick={handleSubmit}>
-            {editingId ? "Save credential" : "Create credential"}
-          </button>
-        </div>
-      </Panel>
 
-      <Panel
-        title="Batch upload"
-        subtitle="Paste an array of credential payloads or upload JSON files."
-      >
+          {fieldSpecs.map((spec) => {
+            const value = fields[spec.key] ?? "";
+            const isWide = spec.type === "textarea";
+            return (
+              <div key={spec.key} className={isWide ? "md:col-span-2" : ""}>
+                <FieldLabel>{fieldLabel(spec.key)}</FieldLabel>
+                <div className="mt-2">
+                  {spec.type === "textarea" ? (
+                    <TextArea value={value} onChange={(next) => setFields((prev) => ({ ...prev, [spec.key]: next }))} rows={4} />
+                  ) : (
+                    <TextInput
+                      value={value}
+                      type={spec.type === "number" ? "number" : spec.type === "password" ? "password" : "text"}
+                      onChange={(next) => setFields((prev) => ({ ...prev, [spec.key]: next }))}
+                    />
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button onClick={() => void submit()}>
+            {editingId ? t("credentials.update_credential") : t("credentials.new_credential")}
+          </Button>
+          {editingId ? (
+            <Button
+              variant="neutral"
+              onClick={() => {
+                setEditingId(null);
+                setDisplayName("");
+                setFields({});
+                setEnabled(true);
+              }}
+            >
+              {t("common.cancel")}
+            </Button>
+          ) : null}
+        </div>
+      </Card>
+
+      <Card title={t("credentials.import_hint")} subtitle={t("credentials.import_files")}>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="label">JSON payloads</label>
-            <textarea
-              className="textarea"
-              rows={6}
-              value={batchText}
-              onChange={(event) => setBatchText(event.target.value)}
-              placeholder='[{"provider_id":1,"secret":{}}]'
-            />
+            <FieldLabel>{t("credentials.import_keys")}</FieldLabel>
+            <div className="mt-2">
+              <TextArea
+                value={importKeys}
+                onChange={setImportKeys}
+                rows={6}
+                placeholder={t("credentials.import_keys_placeholder")}
+              />
+            </div>
           </div>
           <div>
-            <label className="label">Upload files</label>
-            <div className="mt-2 flex flex-wrap items-center gap-3">
-              <label className="btn btn-primary cursor-pointer">
-                Select files
-                <input
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={(event) =>
-                    setBatchFiles(Array.from(event.target.files ?? []))
-                  }
-                />
-              </label>
-              <div className="text-xs text-slate-500">
-                {batchFiles.length ? `${batchFiles.length} file(s) selected.` : "No files selected."}
-              </div>
+            <FieldLabel>{t("credentials.import_files")}</FieldLabel>
+            <div className="mt-2 space-y-2">
+              <input
+                type="file"
+                multiple
+                accept="application/json"
+                onChange={(event) => setImportFiles(Array.from(event.target.files ?? []))}
+              />
+              <div className="text-xs text-slate-500">{importFiles.length} file(s)</div>
             </div>
           </div>
         </div>
-        <button className="btn btn-accent" type="button" onClick={handleBatchUpload}>
-          Upload batch
-        </button>
-      </Panel>
-
-      <Panel
-        title="Credentials"
-        subtitle="Manage existing credentials across providers."
-        action={
-          <button className="btn btn-ghost" type="button" onClick={loadCredentials}>
-            Refresh
-          </button>
-        }
-      >
-        <div className="grid gap-3 md:grid-cols-3">
-          <div>
-            <label className="label">Search</label>
-            <input
-              className="input"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="ID, provider, label..."
-            />
-          </div>
-          <div>
-            <label className="label">Provider filter</label>
-            <select
-              className="select"
-              value={filterProvider}
-              onChange={(event) => setFilterProvider(event.target.value)}
-            >
-              <option value="all">All providers</option>
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="mt-4">
+          <Button onClick={() => void runImport()}>{t("credentials.import_run")}</Button>
         </div>
+      </Card>
 
+      <Card title={t("credentials.list_title")} subtitle={selectedProvider ? `/admin/providers/${selectedProvider}/credentials` : ""}>
         {loading ? (
-          <div className="text-sm text-slate-500">Loading credentials...</div>
-        ) : filteredCredentials.length === 0 ? (
-          <div className="text-sm text-slate-500">No credentials found.</div>
+          <div className="text-sm text-slate-500">{t("common.loading")}</div>
+        ) : rows.length === 0 ? (
+          <div className="text-sm text-slate-500">{t("common.empty")}</div>
         ) : (
           <div className="space-y-3">
-            {filteredCredentials.map((credential) => {
-              const providerName = providerMap.get(credential.provider_id)?.name ?? "Unknown";
-              return (
-                <div
-                  key={credential.id}
-                  className="rounded-2xl border border-slate-200 bg-white/90 p-4"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-800">
-                        {providerName} · #{credential.id}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-400">
-                        {credential.name || maskValue(String(credential.id))}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={`badge ${
-                          credential.enabled
-                            ? "border-emerald-200 text-emerald-600"
-                            : "border-slate-200 text-slate-500"
-                        }`}
-                      >
-                        {credential.enabled ? "Enabled" : "Disabled"}
-                      </span>
-                      <button className="btn btn-ghost" type="button" onClick={() => handleEdit(credential)}>
-                        Edit
-                      </button>
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        onClick={() =>
-                          setExpanded((prev) => ({
-                            ...prev,
-                            [credential.id]: !prev[credential.id]
-                          }))
-                        }
-                      >
-                        {expanded[credential.id] ? "Hide" : "View"}
-                      </button>
-                      <button
-                        className="btn btn-danger"
-                        type="button"
-                        onClick={() => handleDelete(credential)}
-                      >
-                        Delete
-                      </button>
-                    </div>
+            {rows.map((row) => (
+              <div key={row.id} className="rounded-2xl border border-slate-200 bg-white/70 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">#{row.id} {row.name ?? ""}</div>
                   </div>
-                  <div className="mt-3 grid gap-2 text-xs text-slate-500 md:grid-cols-2">
-                    <div>Weight</div>
-                    <div className="text-right text-slate-700">{credential.weight}</div>
-                    <div>Created</div>
-                    <div className="text-right text-slate-700">
-                      {formatTimestamp(credential.created_at)}
-                    </div>
-                    <div>Updated</div>
-                    <div className="text-right text-slate-700">
-                      {formatTimestamp(credential.updated_at)}
-                    </div>
-                  </div>
-                  {expanded[credential.id] ? (
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <div>
-                        <div className="label">Secret</div>
-                        <JsonBlock value={credential.secret} />
-                      </div>
-                      <div>
-                        <div className="label">Meta</div>
-                        <JsonBlock value={credential.meta_json} />
-                      </div>
-                    </div>
-                  ) : null}
+                  <Badge active={row.enabled}>{row.enabled ? t("common.enabled") : t("common.disabled")}</Badge>
                 </div>
-              );
-            })}
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <Button variant="neutral" onClick={() => editRow(row)}>{t("common.edit")}</Button>
+                  <Button variant="neutral" onClick={() => void setRowEnabled(row, !row.enabled)}>
+                    {row.enabled ? t("common.disabled") : t("common.enabled")}
+                  </Button>
+                  <Button variant="danger" onClick={() => void removeRow(row)}>{t("common.delete")}</Button>
+                </div>
+                <div className="mt-3 text-xs text-slate-500">
+                  {Object.keys(row.secret_json).join(", ")}
+                </div>
+              </div>
+            ))}
           </div>
         )}
-      </Panel>
+      </Card>
     </div>
   );
 }

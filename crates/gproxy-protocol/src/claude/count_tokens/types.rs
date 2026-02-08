@@ -1187,12 +1187,16 @@ pub enum BetaOutputEffort {
     Medium,
     #[serde(rename = "high")]
     High,
+    #[serde(rename = "max")]
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BetaOutputConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<BetaOutputEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<BetaJSONOutputFormat>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

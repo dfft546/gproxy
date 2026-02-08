@@ -1,60 +1,172 @@
 # gproxy
 
-gproxy 是一个用 Rust 编写的多渠道 AI 代理服务，带内嵌的管理后台。
+[English](README.md)
 
-## 特性
-- 多渠道路由与凭证管理
-- 管理 API（providers / credentials / users / keys）
-- Usage 统计与部分上游的 usage 直连展示
-- 内嵌 SPA 管理界面（React + Tailwind）
+一个用 Rust 编写的高性能多渠道 LLM 网关，内嵌管理 SPA。
 
-## 快速开始
+gproxy 提供：
+- 统一下游 API（OpenAI / Claude / Gemini 风格路由）
+- 渠道与凭证级路由能力
+- 支持渠道的 OAuth 辅助流程
+- Usage 聚合统计 + 部分渠道实时用量查询
+- 内置管理 API + React 19 + Tailwind 4 管理界面（`/`）
+
+## 内置渠道
+
+首次启动会自动写入以下内置渠道：
+
+- `openai`
+- `claude`
+- `aistudio`
+- `vertexexpress`
+- `vertex`
+- `geminicli`
+- `claudecode`
+- `codex`
+- `antigravity`
+- `nvidia`
+- `deepseek`
+
+你也可以在管理界面/API 中新增 `custom` 类型渠道。
+
+## 工程结构（workspace）
+
+- `apps/gproxy`：可运行服务（二进制，包含 proxy + admin API + 内嵌前端）
+- `crates/gproxy-core`：启动引导、内存状态、代理引擎
+- `crates/gproxy-router`：HTTP 路由（`/` 与 `/admin`）
+- `crates/gproxy-provider-core`：渠道抽象、配置、凭证/运行时状态
+- `crates/gproxy-provider-impl`：内置渠道实现
+- `crates/gproxy-storage`：SeaORM 存储与 usage 持久化
+- `apps/gproxy/frontend`：管理前端源码（React 19 + Tailwind 4）
+
+## 本地快速启动
+
+前置条件：
+- Rust stable
+- Node.js + pnpm（仅在需要重建前端资源时需要）
+
+1. 构建管理前端资源
+
 ```bash
-cargo run --release -- --admin-key your-admin-key
+pnpm -C apps/gproxy/frontend install --frozen-lockfile
+pnpm -C apps/gproxy/frontend build
 ```
-打开管理界面：
+
+2. 启动服务
+
+```bash
+cargo run -p gproxy -- --admin-key your-admin-key
 ```
-http://127.0.0.1:8787/
-```
+
+3. 打开管理界面
+
+- 管理端：`http://127.0.0.1:8080/`
+
+默认监听 `0.0.0.0:8080`，可通过 CLI/环境变量/DB 合并配置覆盖。
 
 ## 配置说明
-gproxy 的配置存储在数据库中，默认使用 `./data` 下的 SQLite。
 
-CLI 参数：
-- `--host <ip>`（默认 `127.0.0.1`）
-- `--port <port>`（默认 `8787`）
-- `--admin-key <key>`（默认 `pwd`）
-- `--dsn <dsn>`（可选，例如 `sqlite:///path/to/gproxy.db`）
-- `--data-dir <dir>`（默认 `./data`）
-- `--proxy <url>`（可选，上游代理）
+启动时全局配置合并顺序：`CLI > ENV > DB`，合并结果会回写数据库。
 
-环境变量：
-- `GPROXY_DATA_DIR`（设置数据目录）
+CLI / ENV（来自 `gproxy_core::bootstrap::CliArgs`）：
 
-管理 API 认证：
-- `x-admin-key: <admin_key>` 或 `Authorization: Bearer <admin_key>`
+- `--dsn` / `GPROXY_DSN`（默认：`sqlite://gproxy.db?mode=rwc`）
+- `--host` / `GPROXY_HOST`（合并后默认：`0.0.0.0`）
+- `--port` / `GPROXY_PORT`（合并后默认：`8080`）
+- `--admin-key` / `GPROXY_ADMIN_KEY`（明文输入，存储时会 hash）
+- `--proxy` / `GPROXY_PROXY`（可选，上游出口代理）
+- `--event-redact-sensitive` / `GPROXY_EVENT_REDACT_SENSITIVE`（默认：`true`）
 
-更多路由与示例见 `route.md`。
+说明：
+- 若未提供 `admin_key` 且 DB 中也不存在，启动时会自动生成并打印一次。
+- 若缺失内置渠道，会在启动时自动补种子。
 
-## 前端
-管理界面位于 `apps/gproxy/frontend`，构建产物会内嵌到
-`apps/gproxy/frontend/dist`。
+## 认证模型
 
-## Docker
+### 管理端（`/admin/...`）
+
+支持以下 admin key 来源（按顺序匹配）：
+- `x-admin-key: <key>`
+- `Authorization: Bearer <key>`
+- Query `?admin_key=<key>`（浏览器连接 `/admin/events/ws` 时有用）
+
+### 代理下游（`/v1/...` 或 `/{provider}/...`）
+
+支持以下 user key 来源（按顺序匹配）：
+- `Authorization: Bearer <key>`
+- `x-api-key: <key>`
+- `x-goog-api-key: <key>`
+- Query `?key=<key>`
+
+启动时会自动创建 `user0`，并插入一条与 admin key 同 hash 的 user key，因此早期测试时可直接用同一明文 key 访问 proxy。
+
+## API 概览
+
+完整路由请看 `route.md`。
+
+主要分组：
+- 无渠道前缀的聚合代理路由（如 `/v1/chat/completions`、`/v1/models`）
+- 带渠道前缀的代理路由（如 `/openai/v1/chat/completions`）
+- 渠道内部能力路由：
+  - `GET /{provider}/oauth`
+  - `GET /{provider}/oauth/callback`
+  - `GET /{provider}/usage?credential_id=<id>`
+- 管理路由 `/admin/...`（渠道、凭证、用户、usage、事件流）
+
+## 管理前端
+
+管理 SPA 挂载在 `/`，静态资源在 `/assets/*`。
+
+当前前端模块包括：
+- 渠道配置（含 `custom` 渠道编辑）
+- 凭证管理（查看/编辑/删除/启停，运行时状态）
+- 批量凭证导入（key/json）
+- OAuth 助手（支持的渠道）
+- 凭证级实时用量/额度视图
+- 用户与 API key 管理
+- 终端事件流查看（`/admin/events/ws`）
+- 多语言（`zh_cn` / `en`）
+
+## 构建与发布
+
+### 二进制
+
+```bash
+cargo build --release -p gproxy
+```
+
+### Docker 镜像
+
 构建：
+
 ```bash
 docker build -t gproxy:local .
 ```
-运行：
+
+运行（显式命令形式）：
+
 ```bash
 docker run --rm -p 8787:8787 \
-  -e GPROXY_ADMIN_KEY=your-admin-key \
   -e GPROXY_HOST=0.0.0.0 \
   -e GPROXY_PORT=8787 \
-  -e GPROXY_DATA_DIR=/app/data \
+  -e GPROXY_ADMIN_KEY=your-admin-key \
+  -e GPROXY_DSN='sqlite:///app/data/gproxy.db?mode=rwc' \
   -v $(pwd)/data:/app/data \
-  gproxy:local
+  gproxy:local \
+  /usr/local/bin/gproxy --host 0.0.0.0 --port 8787 --admin-key your-admin-key --dsn 'sqlite:///app/data/gproxy.db?mode=rwc'
 ```
 
+### GitHub Actions
+
+- `.github/workflows/docker.yml`：构建并推送多架构 GHCR 镜像
+- `.github/workflows/release-binary.yml`：跨 OS/arch 构建发布二进制
+
+## 相关文档
+
+- `route.md`：路由与行为说明
+- `provider.md`：各渠道凭证/配置细节
+- `PLAN.md`：项目计划草案
+
 ## License
+
 AGPL-3.0-or-later
