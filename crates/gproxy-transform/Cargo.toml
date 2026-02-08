@@ -1,0 +1,10 @@
+[package]
+name = "gproxy-transform"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gproxy-protocol = { path = "../gproxy-protocol" }
+serde = "1"
+serde_json = "1"
+time = "0.3"
